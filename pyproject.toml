@@ -16,6 +16,7 @@ dependencies = [
     "torchvision>=0.28.0",
     "tqdm>=4.70.0",
     "wandb>=0.28.2",
+    "lapsum",
 ]
 
 [build-system]
@@ -24,3 +25,4 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 clip = { git = "https://github.com/openai/CLIP.git" }
+lapsum = { path = "packages/LapSum/lapsum" }

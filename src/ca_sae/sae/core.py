@@ -193,3 +193,25 @@ def geometric_median(points: torch.Tensor, max_iter: int = 100, tol: float = 1e-
             break
 
     return guess
+
+
+def topk_per_row(x, k):
+    # x: (B, D)
+    # k: (B,)
+    _, D = x.shape
+
+    # sort each row descending
+    vals, idx = torch.sort(x, dim=1, descending=True)
+
+    # create a mask: True for positions < k[i]
+    arange = torch.arange(D, device=x.device)
+    mask = arange.unsqueeze(0) < k.unsqueeze(1)  # (B, D)
+
+    # zero out values beyond top k[i]
+    vals = vals * mask
+
+    # scatter back to original positions
+    out = torch.zeros_like(x)
+    out.scatter_(1, idx, vals)
+
+    return out

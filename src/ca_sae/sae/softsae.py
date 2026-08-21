@@ -4,28 +4,45 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from lapsum.topk import soft_topk
 
 from ca_sae.sae.config import SAEConfig
-from ca_sae.sae.core import geometric_median
-
-from .core import (
+from ca_sae.sae.core import (
     Dictionary,
     SAETrainer,
+    geometric_median,
     get_lr_schedule,
     remove_gradient_parallel_to_decoder_directions,
     set_decoder_norm_to_unit_norm,
+    topk_per_row,
 )
 
 
-class BatchTopKSAE(Dictionary, nn.Module):
-    def __init__(self, activation_dim: int, dict_size: int, k: int):
+class SoftSAE(Dictionary, nn.Module):
+    def __init__(
+        self,
+        activation_dim: int,
+        dict_size: int,
+        k: int,
+        alpha: float,
+        k_max: Optional[int] = None,
+    ):
         super().__init__()
         self.activation_dim = activation_dim
         self.dict_size = dict_size
 
+        if k_max is None:
+            k_max = k * 2
+
         assert isinstance(k, int) and k > 0, f"k={k} must be a positive integer"
         self.register_buffer("k", torch.tensor(k, dtype=torch.int))
-        self.register_buffer("threshold", torch.tensor(-1.0, dtype=torch.float32))
+        self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+        self.register_buffer("k_max", torch.tensor(k_max, dtype=torch.int))
+        self.register_buffer("norm_factor", torch.tensor(1.0))
+        self.register_buffer(
+            "shift_factor", torch.zeros(activation_dim, dtype=torch.float32)
+        )
 
         self.decoder = nn.Linear(dict_size, activation_dim, bias=False)
         self.decoder.weight.data = set_decoder_norm_to_unit_norm(
@@ -37,51 +54,65 @@ class BatchTopKSAE(Dictionary, nn.Module):
         self.encoder.bias.data.zero_()
         self.b_dec = nn.Parameter(torch.zeros(activation_dim))
 
-    def encode(
-        self, x: torch.Tensor, return_active: bool = False, use_threshold: bool = True
-    ):
-        post_relu_feat_acts_BF = nn.functional.relu(self.encoder(x - self.b_dec))
+        k_estimator_encoder = nn.Linear(activation_dim, dict_size)
+        k_estimator_encoder.weight.data = self.encoder.weight.data.clone()
+        k_estimator_encoder.bias.data.zero_()
+        self.k_estimator = nn.Sequential(
+            k_estimator_encoder, nn.ReLU(), nn.Linear(dict_size, 1), nn.ReLU()
+        )
 
-        if use_threshold:
-            encoded_acts_BF = post_relu_feat_acts_BF * (
-                post_relu_feat_acts_BF > self.threshold
-            )
+    def estimate_k(self, x: torch.Tensor) -> torch.Tensor:
+        logit = self.k_estimator((x - self.b_dec) / self.norm_factor).squeeze(-1)
+        k_hat = logit * (self.k_max)
+        return torch.clamp(k_hat, min=1, max=self.dict_size)
+
+    def encode(self, x: torch.Tensor, return_active: bool = False, use_hard_topk=True):
+        post_relu_feat_acts = F.relu(self.encoder(x - self.b_dec))
+
+        if use_hard_topk:
+            with torch.no_grad():
+                k_estimate = self.estimate_k(x).long()
+                encoded_acts = topk_per_row(post_relu_feat_acts, k_estimate)
         else:
-            # Flatten and perform batch top-k
-            flattened_acts = post_relu_feat_acts_BF.flatten()
-            post_topk = flattened_acts.topk(self.k * x.size(0), sorted=False, dim=-1)
-
-            encoded_acts_BF = (
-                torch.zeros_like(post_relu_feat_acts_BF.flatten())
-                .scatter_(-1, post_topk.indices, post_topk.values)
-                .reshape(post_relu_feat_acts_BF.shape)
+            k_estimate = self.estimate_k(x)
+            weights = soft_topk(
+                post_relu_feat_acts,
+                k_estimate.view(k_estimate.shape[0], 1),
+                self.alpha.clone(),
             )
+            encoded_acts = post_relu_feat_acts * weights
 
         if return_active:
-            return encoded_acts_BF, encoded_acts_BF.sum(0) > 0, post_relu_feat_acts_BF
+            return (
+                encoded_acts,
+                encoded_acts.sum(0) > 0,
+                post_relu_feat_acts,
+                k_estimate,
+            )
         else:
-            return encoded_acts_BF
+            return encoded_acts
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(x) + self.b_dec
 
     def forward(self, x: torch.Tensor, output_features: bool = False):
-        encoded_acts_BF = self.encode(x)
-        x_hat_BD = self.decode(encoded_acts_BF)
+        encoded_acts = self.encode(x)
+        x_hat = self.decode(encoded_acts)
 
         if not output_features:
-            return x_hat_BD
+            return x_hat
         else:
-            return x_hat_BD, encoded_acts_BF
+            return x_hat, encoded_acts
 
     def scale_biases(self, scale: float):
         self.encoder.bias.data *= scale
         self.b_dec.data *= scale
-        if self.threshold >= 0:
-            self.threshold *= scale
+        self.norm_factor.fill_(scale)
 
     @classmethod
-    def from_pretrained(cls, path, k=None, device=None, **kwargs) -> "BatchTopKSAE":
+    def from_pretrained(
+        cls, path, k=None, alpha=None, device=None, **kwargs
+    ) -> "SoftSAE":
         state_dict = torch.load(path)
         dict_size, activation_dim = state_dict["encoder.weight"].shape
         if k is None:
@@ -89,7 +120,14 @@ class BatchTopKSAE(Dictionary, nn.Module):
         elif "k" in state_dict and k != state_dict["k"].item():
             raise ValueError(f"k={k} != {state_dict['k'].item()}=state_dict['k']")
 
-        autoencoder = cls(activation_dim, dict_size, k)
+        if alpha is None:
+            alpha = state_dict["alpha"].item()
+        elif "alpha" in state_dict and alpha != state_dict["alpha"].item():
+            raise ValueError(
+                f"alpha={k} != {state_dict['alpha'].item()}=state_dict['alpha']"
+            )
+
+        autoencoder = cls(activation_dim, dict_size, k, alpha)
         autoencoder.load_state_dict(state_dict)
         if device is not None:
             autoencoder.to(device)
@@ -97,21 +135,40 @@ class BatchTopKSAE(Dictionary, nn.Module):
 
 
 @dataclass
-class BatchTopKSAEConfig(SAEConfig):
-    pass
+class SoftSAEConfig(SAEConfig):
+    k_loss_weight = 1.0
+    k_loss_beta = 5.0
+    soft_topk_alpha = 0.0001
+    alpha_anneal_steps: Optional[int] = None
+    hard_topk_steps: Optional[int] = None
+    k_max: Optional[int] = None
+    softplus_beta: float = 5.0
 
 
-class BatchTopKTrainer(SAETrainer):
-    def __init__(self, steps: int, cfg: BatchTopKSAEConfig):
+class SoftSAETrainer(SAETrainer):
+    ae: SoftSAE
+
+    def __init__(self, steps: int, cfg: SoftSAEConfig):
         super().__init__(steps, cfg)
+        self.steps = steps
         self.decay_start = cfg.decay_start
         self.warmup_steps = cfg.warmup_steps
         self.k = cfg.k
-        self.threshold_beta = cfg.threshold_beta
-        self.threshold_start_step = cfg.threshold_start_step
+        self.k_max = cfg.k_max
         self.k_anneal_steps = cfg.k_anneal_steps
+        self.k_loss_weight = cfg.k_loss_weight
+        self.k_loss_beta = cfg.k_loss_beta
+        self.soft_topk_alpha = cfg.soft_topk_alpha
+        self.alpha_anneal_steps = cfg.alpha_anneal_steps
+        self.hard_topk_steps = cfg.hard_topk_steps
 
-        self.ae = BatchTopKSAE(cfg.activation_dim, cfg.dict_size, cfg.k)
+        self.ae = SoftSAE(
+            cfg.activation_dim,
+            cfg.dict_size,
+            cfg.k,
+            1 if cfg.alpha_anneal_steps is not None else cfg.soft_topk_alpha,
+            cfg.k_max,
+        )
 
         if cfg.lr is not None:
             self.lr = cfg.lr
@@ -123,28 +180,39 @@ class BatchTopKTrainer(SAETrainer):
         self.auxk_alpha = cfg.auxk_alpha
         self.dead_feature_threshold = cfg.dead_feature_threshold
         self.top_k_aux = cfg.activation_dim // 2  # Heuristic from B.1 of the paper
-        self.num_tokens_since_fired = torch.zeros(
-            cfg.dict_size,
-            dtype=torch.long,
-        )
+        self.softplus_beta = cfg.softplus_beta
+        self.num_tokens_since_fired = torch.zeros(cfg.dict_size, dtype=torch.long)
         self.logging_parameters = [
             "effective_l0",
             "dead_features",
             "pre_norm_auxk_loss",
+            "avg_k",
+            "min_k",
+            "max_k",
+            "k_loss",
+            "ae_soft_topk_alpha",
+            "use_hard_topk",
+            "lr_log",
         ]
         self.effective_l0 = -1
         self.dead_features = -1
         self.pre_norm_auxk_loss = -1
+        self.avg_k = -1
+        self.min_k = -1
+        self.max_k = -1
+        self.k_loss = -1
+        self.ae_soft_topk_alpha = 1
+        self.use_hard_topk = 0
 
         self.optimizer = torch.optim.Adam(
             self.ae.parameters(), lr=self.lr, betas=(0.9, 0.999)
         )
 
         lr_fn = get_lr_schedule(steps, cfg.warmup_steps, decay_start=cfg.decay_start)
-
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lr_lambda=lr_fn
         )
+        self.lr_log = self.scheduler.get_last_lr()[0]
 
     def to(self, *args, **kwargs):
         self.ae.to(*args, **kwargs)
@@ -154,7 +222,7 @@ class BatchTopKTrainer(SAETrainer):
         self, step: int, activation_dim: int, k_anneal_steps: Optional[int] = None
     ) -> None:
         """Update k buffer in-place with annealed value"""
-        if k_anneal_steps is None:
+        if k_anneal_steps is None or k_anneal_steps == 0:
             return
 
         assert (
@@ -169,6 +237,21 @@ class BatchTopKTrainer(SAETrainer):
 
         # Update in-place
         self.ae.k.fill_(int(annealed_value))
+
+    def update_annealed_alpha(
+        self, step: int, alpha_anneal_steps: Optional[int] = None
+    ):
+        if alpha_anneal_steps is None or alpha_anneal_steps == 0:
+            return
+
+        assert (
+            0 <= alpha_anneal_steps < self.steps
+        ), "alpha_anneal_steps must be >= 0 and < steps."
+
+        step = min(step, alpha_anneal_steps)
+        ratio = step / alpha_anneal_steps
+        annealed_value = (1 - ratio) + self.soft_topk_alpha * ratio
+        self.ae.alpha.fill_(annealed_value)
 
     def get_auxiliary_loss(
         self, residual_BD: torch.Tensor, post_relu_acts_BF: torch.Tensor
@@ -216,31 +299,17 @@ class BatchTopKTrainer(SAETrainer):
             self.pre_norm_auxk_loss = -1
             return torch.tensor(0, dtype=residual_BD.dtype, device=residual_BD.device)
 
-    def update_threshold(self, f: torch.Tensor):
-        device_type = "cuda" if f.is_cuda else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False), torch.no_grad():
-            active = f[f > 0]
-
-            if active.size(0) == 0:
-                min_activation = 0.0
-            else:
-                min_activation = active.min().detach().to(dtype=torch.float32)
-
-            if self.ae.threshold < 0:
-                self.ae.threshold = min_activation
-            else:
-                self.ae.threshold = (self.threshold_beta * self.ae.threshold) + (
-                    (1 - self.threshold_beta) * min_activation
-                )
+    def get_k_loss(self, estimated_k: torch.Tensor):
+        return F.softplus(estimated_k.mean() - self.ae.k, beta=self.softplus_beta)
 
     def loss(self, x, step=None, logging=False):
-        f, active_indices_F, post_relu_acts_BF = self.ae.encode(
-            x, return_active=True, use_threshold=False
+        use_hard_topk = self.hard_topk_steps is not None and step > (
+            self.steps - self.hard_topk_steps
         )
-        # l0 = (f != 0).float().sum(dim=-1).mean().item()
 
-        if step > self.threshold_start_step:
-            self.update_threshold(f)
+        f, active_indices_F, post_relu_acts, estimated_k = self.ae.encode(
+            x, return_active=True, use_hard_topk=use_hard_topk
+        )
 
         x_hat = self.ae.decode(f)
 
@@ -254,9 +323,18 @@ class BatchTopKTrainer(SAETrainer):
         self.num_tokens_since_fired += num_tokens_in_step
         self.num_tokens_since_fired[did_fire] = 0
 
+        self.avg_k = estimated_k.mean(dtype=torch.float32)
+        self.min_k = estimated_k.min()
+        self.max_k = estimated_k.max()
+        self.ae_soft_topk_alpha = self.ae.alpha.item()
+        self.use_hard_topk = 1 if use_hard_topk else 0
+        self.lr_log = self.scheduler.get_last_lr()[0]
+
         l2_loss = e.pow(2).sum(dim=-1).mean()
-        auxk_loss = self.get_auxiliary_loss(e.detach(), post_relu_acts_BF)
-        loss = l2_loss + self.auxk_alpha * auxk_loss
+        auxk_loss = self.get_auxiliary_loss(e.detach(), post_relu_acts)
+        k_loss = self.get_k_loss(estimated_k) if not use_hard_topk else 0.0
+        self.k_loss = k_loss
+        loss = l2_loss + self.k_loss_weight * k_loss + self.auxk_alpha * auxk_loss
 
         if not logging:
             return loss
@@ -293,6 +371,7 @@ class BatchTopKTrainer(SAETrainer):
         self.optimizer.zero_grad()
         self.scheduler.step()
         self.update_annealed_k(step, self.ae.activation_dim, self.k_anneal_steps)
+        self.update_annealed_alpha(step, self.alpha_anneal_steps)
 
         # Make sure the decoder is still unit-norm
         self.ae.decoder.weight.data = set_decoder_norm_to_unit_norm(

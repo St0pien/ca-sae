@@ -5,18 +5,22 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import wandb
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
+import wandb
 from ca_sae.dataset import ActivationsDataset
-from ca_sae.sae.batch_top_k import BatchTopKTrainer
+from ca_sae.sae.batch_top_k import BatchTopKSAEConfig, BatchTopKTrainer
 from ca_sae.sae.config import AUTOCAST_DTYPE, SAEConfig, TrainConfig, WandbConfig
 from ca_sae.sae.core import SAETrainer
+from ca_sae.sae.softsae import SoftSAEConfig, SoftSAETrainer
 
 
 def make_sae_trainer(steps: int, cfg: SAEConfig) -> SAETrainer:
-    return BatchTopKTrainer(steps, cfg)
+    if isinstance(cfg, BatchTopKSAEConfig):
+        return BatchTopKTrainer(steps, cfg)
+    else:
+        return SoftSAETrainer(steps, cfg)
 
 
 def get_norm_factor(data) -> float:
@@ -139,9 +143,21 @@ if __name__ == "__main__":
     main(
         TrainConfig(
             activations_path="activations/imagenet_train_hf",
-            sae=SAEConfig(512, 4096, 64),
+            sae=SoftSAEConfig(
+                512,
+                4096,
+                64,
+                lr=6e-4,
+                hard_topk_steps=4000,
+                alpha_anneal_steps=1000,
+                decay_start=5000,
+            ),
             epochs=100,
-            save_dir="checkpoints/test/BatchTopKSAESecond",
-            wandb=WandbConfig(entity="st0pien-default-team", project="CASAE", name="BatchTopKSAESecond")
+            save_dir="checkpoints/test/SoftSAE_4096_64",
+            wandb=WandbConfig(
+                entity="st0pien-default-team",
+                project="CASAE",
+                name="SoftSAE_4096_64_basic",
+            ),
         )
     )

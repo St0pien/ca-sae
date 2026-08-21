@@ -7,6 +7,7 @@ from tqdm import tqdm
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.batch_top_k import BatchTopKSAE
 from ca_sae.sae.core import Dictionary
+from ca_sae.sae.softsae import SoftSAE
 
 
 @torch.no_grad()
@@ -74,8 +75,9 @@ def main(
 
 
 def cli():
-    dataset = ActivationsDataset("activations/imagenet_train_hf")
-    sae = BatchTopKSAE.from_pretrained("checkpoints/test/BatchTopKSAESecond/ae.pt")
+    dataset = ActivationsDataset("activations/imagenet_test_hf")
+    # sae = BatchTopKSAE.from_pretrained("checkpoints/test/BatchTopKSAESecond/ae.pt")
+    sae = SoftSAE.from_pretrained("checkpoints/test/SoftSAE_4096_64/ae.pt")
     results = main(sae, dataset)
 
     print(results)
