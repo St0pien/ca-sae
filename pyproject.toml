@@ -17,6 +17,9 @@ dependencies = [
     "tqdm>=4.70.0",
     "wandb>=0.28.2",
     "lapsum",
+    "ipywidgets>=8.1.9",
+    "matplotlib>=3.11.1",
+    "scikit-learn>=1.9.0",
 ]
 
 [build-system]

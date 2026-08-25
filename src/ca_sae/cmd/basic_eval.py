@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.batch_top_k import BatchTopKSAE
+from ca_sae.sae.ca_sae import ClassAlignedSAE
 from ca_sae.sae.core import Dictionary
 from ca_sae.sae.softsae import SoftSAE
 
@@ -77,7 +78,12 @@ def main(
 def cli():
     dataset = ActivationsDataset("activations/imagenet_test_hf")
     # sae = BatchTopKSAE.from_pretrained("checkpoints/test/BatchTopKSAESecond/ae.pt")
-    sae = SoftSAE.from_pretrained("checkpoints/test/SoftSAE_4096_64/ae.pt")
+    # sae = BatchTopKSAE.from_pretrained("checkpoints/test/batch_topk_92/ae.pt")
+    # sae = SoftSAE.from_pretrained("checkpoints/test/rework_v1_basic_l0/ae.pt")
+    # sae = SoftSAE.from_pretrained("checkpoints/test/rework_v1_gradient_trick/ae.pt")
+    # sae = ClassAlignedSAE.from_pretrained("checkpoints/test/ca_sae_v1/ae.pt", features_per_class = 5)
+    sae = ClassAlignedSAE.from_pretrained("checkpoints/test/ca_sae_v2")
+    # sae = BatchTopKSAE.from_pretrained("checkpoints/test/batchtopk_63")
     results = main(sae, dataset)
 
     print(results)

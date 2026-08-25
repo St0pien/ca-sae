@@ -23,7 +23,7 @@ class ActivationsDataset(TensorDataset):
         )
         labels = np.memmap(
             labels_path,
-            dtype=np.float16,
+            dtype=np.int64,
             mode="r",
             shape=(config["dataset_size"],),
         )

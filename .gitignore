@@ -14,3 +14,4 @@ data/
 activations/
 checkpoints/
 wandb/
+hf_cache

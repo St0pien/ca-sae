@@ -63,7 +63,7 @@ class SoftSAE(Dictionary, nn.Module):
 
     def estimate_k(self, x: torch.Tensor) -> torch.Tensor:
         logit = self.k_estimator((x - self.b_dec) / self.norm_factor).squeeze(-1)
-        k_hat = logit * (self.k_max)
+        k_hat = logit * (self.dict_size)
         return torch.clamp(k_hat, min=1, max=self.dict_size)
 
     def encode(self, x: torch.Tensor, return_active: bool = False, use_hard_topk=True):
@@ -136,9 +136,9 @@ class SoftSAE(Dictionary, nn.Module):
 
 @dataclass
 class SoftSAEConfig(SAEConfig):
-    k_loss_weight = 1.0
-    k_loss_beta = 5.0
-    soft_topk_alpha = 0.0001
+    k_loss_weight: float = 1.0
+    k_loss_beta: float = 5.0
+    soft_topk_alpha: float = 0.0001
     alpha_anneal_steps: Optional[int] = None
     hard_topk_steps: Optional[int] = None
     k_max: Optional[int] = None
@@ -193,6 +193,8 @@ class SoftSAETrainer(SAETrainer):
             "ae_soft_topk_alpha",
             "use_hard_topk",
             "lr_log",
+            "avg_enc_grad",
+            "avg_mlp_grad",
         ]
         self.effective_l0 = -1
         self.dead_features = -1
@@ -203,6 +205,8 @@ class SoftSAETrainer(SAETrainer):
         self.k_loss = -1
         self.ae_soft_topk_alpha = 1
         self.use_hard_topk = 0
+        self.avg_enc_grad = 0
+        self.avg_mlp_grad = 0
 
         self.optimizer = torch.optim.Adam(
             self.ae.parameters(), lr=self.lr, betas=(0.9, 0.999)
@@ -299,8 +303,11 @@ class SoftSAETrainer(SAETrainer):
             self.pre_norm_auxk_loss = -1
             return torch.tensor(0, dtype=residual_BD.dtype, device=residual_BD.device)
 
+    # def get_k_loss(self, estimated_k: torch.Tensor):
+    #     return F.softplus(estimated_k.mean() - self.ae.k, beta=self.softplus_beta)
+
     def get_k_loss(self, estimated_k: torch.Tensor):
-        return F.softplus(estimated_k.mean() - self.ae.k, beta=self.softplus_beta)
+        return estimated_k.mean() / self.ae.dict_size
 
     def loss(self, x, step=None, logging=False):
         use_hard_topk = self.hard_topk_steps is not None and step > (
@@ -311,7 +318,16 @@ class SoftSAETrainer(SAETrainer):
             x, return_active=True, use_hard_topk=use_hard_topk
         )
 
-        x_hat = self.ae.decode(f)
+        with torch.no_grad():
+            f_hard = self.ae.encode(x, use_hard_topk=True)
+
+        f_combined = f_hard + (f - f.detach())
+
+        x_hat = self.ae.decode(f_combined)
+
+        with torch.no_grad():
+            x_hat_soft = self.ae.decode(f)
+            print(torch.nn.functional.mse_loss(x_hat, x_hat_soft))
 
         e = x - x_hat
 
@@ -342,7 +358,7 @@ class SoftSAETrainer(SAETrainer):
             return namedtuple("LossLog", ["x", "x_hat", "f", "losses"])(
                 x,
                 x_hat,
-                f,
+                f_hard,
                 {
                     "l2_loss": l2_loss.item(),
                     "auxk_loss": auxk_loss.item(),
@@ -358,6 +374,17 @@ class SoftSAETrainer(SAETrainer):
 
         loss = self.loss(x, step=step)
         loss.backward()
+
+        self.avg_enc_grad = (
+            self.ae.encoder.weight.grad.mean().item()
+            if self.ae.encoder.weight.grad is not None
+            else 0
+        )
+        self.avg_mlp_grad = (
+            self.ae.k_estimator[0].weight.grad.mean().item()
+            if self.ae.k_estimator[0].weight.grad is not None
+            else 0
+        )
 
         self.ae.decoder.weight.grad = remove_gradient_parallel_to_decoder_directions(
             self.ae.decoder.weight,

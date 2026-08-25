@@ -11,6 +11,7 @@ from tqdm import tqdm
 import wandb
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.batch_top_k import BatchTopKSAEConfig, BatchTopKTrainer
+from ca_sae.sae.ca_sae import ClassAlignedSAEConfig, ClassAlignedSAETrainer
 from ca_sae.sae.config import AUTOCAST_DTYPE, SAEConfig, TrainConfig, WandbConfig
 from ca_sae.sae.core import SAETrainer
 from ca_sae.sae.softsae import SoftSAEConfig, SoftSAETrainer
@@ -19,8 +20,12 @@ from ca_sae.sae.softsae import SoftSAEConfig, SoftSAETrainer
 def make_sae_trainer(steps: int, cfg: SAEConfig) -> SAETrainer:
     if isinstance(cfg, BatchTopKSAEConfig):
         return BatchTopKTrainer(steps, cfg)
-    else:
+    elif isinstance(cfg, SoftSAEConfig):
         return SoftSAETrainer(steps, cfg)
+    elif isinstance(cfg, ClassAlignedSAEConfig):
+        return ClassAlignedSAETrainer(steps, cfg)
+    else:
+        raise ValueError(f"Unkown sae config: {cfg.__class__.__name__}")
 
 
 def get_norm_factor(data) -> float:
@@ -50,11 +55,15 @@ def get_norm_factor(data) -> float:
     return norm_factor
 
 
-def get_stats(trainer: SAETrainer, step: int, act: torch.Tensor):
+def get_stats(trainer: SAETrainer, step: int, act: torch.Tensor, labels: torch.Tensor):
     with torch.no_grad():
         x = act.clone()
+        y = labels.clone()
         log = {}
-        x, x_hat, f, losslog = trainer.loss(x, step=step, logging=True)
+        if isinstance(trainer, ClassAlignedSAETrainer):
+            x, x_hat, f, losslog = trainer.loss(x, y, step=step, logging=True)
+        else:
+            x, x_hat, f, losslog = trainer.loss(x, step=step, logging=True)
 
         l0 = (f != 0).float().sum(dim=-1).mean().item()
         total_variance = torch.var(x, dim=0).sum()
@@ -124,7 +133,7 @@ def main(cfg: TrainConfig):
                 if cfg.normalize_activations:
                     activations /= norm_factor
 
-                log_obj = get_stats(trainer, step, activations)
+                log_obj = get_stats(trainer, step, activations, labels)
                 wandb_run.log(log_obj)
 
                 with autocast_context:
@@ -143,21 +152,30 @@ if __name__ == "__main__":
     main(
         TrainConfig(
             activations_path="activations/imagenet_train_hf",
-            sae=SoftSAEConfig(
+            # sae=ClassAlignedSAEConfig(
+            #     512,
+            #     4096,
+            #     64,
+            #     lr=6e-4,
+            #     soft_topk_alpha=0.001,
+            #     # hard_topk_steps=2000,
+            #     # alpha_anneal_steps=1000,
+            #     decay_start=5000,
+            #     agreement_loss_weight=0.15,
+            # ),
+            sae=BatchTopKSAEConfig(
                 512,
                 4096,
-                64,
+                63,
                 lr=6e-4,
-                hard_topk_steps=4000,
-                alpha_anneal_steps=1000,
                 decay_start=5000,
             ),
-            epochs=100,
-            save_dir="checkpoints/test/SoftSAE_4096_64",
-            wandb=WandbConfig(
-                entity="st0pien-default-team",
-                project="CASAE",
-                name="SoftSAE_4096_64_basic",
-            ),
+            epochs=30,
+            save_dir="checkpoints/test/batchtopk_63",
+            # wandb=WandbConfig(
+            #     entity="st0pien-default-team",
+            #     project="CASAE",
+            #     name="ca_sae_v2",
+            # ),
         )
     )
