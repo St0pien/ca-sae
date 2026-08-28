@@ -12,7 +12,7 @@ from PIL import Image
 from tqdm import tqdm
 
 
-class ImgeNetDataset(Dataset):
+class ImageNetDataset(Dataset):
     def __init__(self, preprocess, split):
         self.dataset = load_dataset("ILSVRC/imagenet-1k", split=split)
         self.len = self.dataset.info.splits[split].num_examples
@@ -47,7 +47,7 @@ def main(
 
     clip_model, clip_preprocess = clip.load(clip_variant)
 
-    dataset = ImgeNetDataset(clip_preprocess, split)
+    dataset = ImageNetDataset(clip_preprocess, split)
     num_images = len(dataset)
 
     dataloader = DataLoader(

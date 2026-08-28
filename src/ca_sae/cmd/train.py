@@ -17,6 +17,72 @@ from ca_sae.sae.core import SAETrainer
 from ca_sae.sae.softsae import SoftSAEConfig, SoftSAETrainer
 
 
+from torch.utils.data import Sampler
+
+
+class ChunkBatchSampler(Sampler):
+    def __init__(
+        self,
+        dataset_size: int,
+        batch_size: int,
+        chunk_size: int,
+        seed: int = 0,
+        drop_last: bool = True,
+    ):
+        if chunk_size % batch_size != 0:
+            raise ValueError("chunk_size must be divisible by batch_size")
+
+        self.dataset_size = dataset_size
+        self.batch_size = batch_size
+        self.chunk_size = chunk_size
+        self.seed = seed
+        self.drop_last = drop_last
+
+        self.num_chunks = (dataset_size + chunk_size - 1) // chunk_size
+
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+
+        chunks = np.arange(self.num_chunks)
+        rng.shuffle(chunks)
+
+        for chunk in chunks:
+            start = chunk * self.chunk_size
+            end = min(
+                start + self.chunk_size,
+                self.dataset_size,
+            )
+
+            # Generate batches sequentially.
+            for batch_start in range(
+                start,
+                end,
+                self.batch_size,
+            ):
+                batch_end = min(
+                    batch_start + self.batch_size,
+                    end,
+                )
+
+                if self.drop_last and batch_end - batch_start < self.batch_size:
+                    continue
+
+                yield list(range(batch_start, batch_end))
+
+    def __len__(self):
+        full_batches = self.dataset_size // self.batch_size
+
+        if self.drop_last:
+            return full_batches
+
+        return (self.dataset_size + self.batch_size - 1) // self.batch_size
+
+
 def make_sae_trainer(steps: int, cfg: SAEConfig) -> SAETrainer:
     if isinstance(cfg, BatchTopKSAEConfig):
         return BatchTopKTrainer(steps, cfg)
@@ -109,12 +175,17 @@ def main(cfg: TrainConfig):
     )
 
     dataset = ActivationsDataset(cfg.activations_path)
+    batch_sampler = ChunkBatchSampler(
+        dataset_size=len(dataset),
+        batch_size=cfg.dataloader.batch_size,
+        chunk_size=262_144,
+        seed=42,
+    )
     dataloader = DataLoader(
         dataset,
-        batch_size=cfg.dataloader.batch_size,
+        batch_sampler=batch_sampler,
         num_workers=cfg.dataloader.num_workers,
         prefetch_factor=cfg.dataloader.prefetch_factor,
-        shuffle=cfg.dataloader.shuffle,
     )
 
     trainer = make_sae_trainer(cfg.epochs * len(dataloader), cfg.sae)
@@ -171,7 +242,7 @@ if __name__ == "__main__":
                 decay_start=5000,
             ),
             epochs=30,
-            save_dir="checkpoints/test/batchtopk_63",
+            save_dir="checkpoints/test/asdfasdf",
             # wandb=WandbConfig(
             #     entity="st0pien-default-team",
             #     project="CASAE",

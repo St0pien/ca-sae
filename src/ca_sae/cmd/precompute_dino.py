@@ -9,7 +9,23 @@ from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 from tqdm import tqdm
 from transformers import AutoImageProcessor, AutoModel
-from .precompute_imagenet import ImgeNetDataset
+from .precompute_imagenet import ImageNetDataset
+
+
+def make_collate_fn(processor):
+    def collate_fn(batch):
+        images, labels = zip(*batch)
+
+        images = processor(
+            list(images),
+            return_tensors="pt",
+        )
+
+        labels = torch.tensor(labels, dtype=torch.long)
+
+        return images, labels
+
+    return collate_fn
 
 
 def main(
@@ -30,7 +46,7 @@ def main(
     dinov3_model = dinov3_model.to(device)
     dinov3_model.eval()
 
-    dataset = ImgeNetDataset(dinov3_processor, split)
+    dataset = ImageNetDataset(None, split)
     num_images = len(dataset)
 
     dataloader = DataLoader(
@@ -38,6 +54,7 @@ def main(
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
+        collate_fn=make_collate_fn(dinov3_processor),
     )
 
     embedding_size = dinov3_model.config.hidden_size

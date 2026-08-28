@@ -29,5 +29,5 @@ class ActivationsDataset(TensorDataset):
         )
 
         super().__init__(
-            torch.from_numpy(embeddings.copy()), torch.from_numpy(labels.copy())
+            torch.from_numpy(embeddings), torch.from_numpy(labels)
         )
