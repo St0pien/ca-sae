@@ -1,9 +1,13 @@
+import argparse
+import json
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
+from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.batch_top_k import BatchTopKSAE
 from ca_sae.sae.ca_sae import ClassAlignedSAE
@@ -76,17 +80,128 @@ def main(
 
 
 def cli():
-    dataset = ActivationsDataset("activations/imagenet_test_hf")
-    # sae = BatchTopKSAE.from_pretrained("checkpoints/test/BatchTopKSAESecond/ae.pt")
-    # sae = BatchTopKSAE.from_pretrained("checkpoints/test/batch_topk_92/ae.pt")
-    # sae = SoftSAE.from_pretrained("checkpoints/test/rework_v1_basic_l0/ae.pt")
-    # sae = SoftSAE.from_pretrained("checkpoints/test/rework_v1_gradient_trick/ae.pt")
-    # sae = ClassAlignedSAE.from_pretrained("checkpoints/test/ca_sae_v1/ae.pt", features_per_class = 5)
-    sae = ClassAlignedSAE.from_pretrained("checkpoints/test/ca_sae_v2")
-    # sae = BatchTopKSAE.from_pretrained("checkpoints/test/batchtopk_63")
-    results = main(sae, dataset)
+    parser = argparse.ArgumentParser(
+        description="Evaluate reconstruction statistics of a ClassAlignedSAE."
+    )
 
-    print(results)
+    parser.add_argument(
+        "--architecture",
+        "-a",
+        type=str,
+        default=None,
+        choices=list(SUPPORTED_ARCHITECTURES.keys()),
+        help="Architecture of the trained SAE.",
+    )
+
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        required=True,
+        help="Path to the ClassAlignedSAE checkpoint directory.",
+    )
+
+    parser.add_argument(
+        "--activations-path",
+        type=str,
+        required=True,
+        help="Path to the ActivationsDataset directory.",
+    )
+
+    parser.add_argument(
+        "--output-path",
+        type=str,
+        default=None,
+        help="Optional path to save results as JSON.",
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4096,
+        help="Evaluation batch size.",
+    )
+
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader workers.",
+    )
+
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device, e.g. cuda, cuda:0, or cpu. Defaults to CUDA if available.",
+    )
+
+    parser.add_argument(
+        "--max-examples",
+        type=int,
+        default=None,
+        help="Optionally evaluate only the first N examples.",
+    )
+
+    args = parser.parse_args()
+
+    device = args.device
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # --------------------------------------------------------------
+    # Dataset
+    # --------------------------------------------------------------
+
+    dataset = ActivationsDataset(args.activations_path)
+
+    if args.max_examples is not None:
+        max_examples = min(args.max_examples, len(dataset))
+        dataset = torch.utils.data.Subset(
+            dataset,
+            range(max_examples),
+        )
+
+    # --------------------------------------------------------------
+    # SAE
+    # --------------------------------------------------------------
+
+    sae = SUPPORTED_ARCHITECTURES[args.architecture].from_pretrained(
+        args.checkpoint_path,
+        device=device,
+    )
+    sae.eval()
+
+    # --------------------------------------------------------------
+    # Evaluation
+    # --------------------------------------------------------------
+
+    results = main(
+        dictionary=sae,
+        dataset=dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        device=device,
+    )
+
+    print("\n=== SAE Evaluation ===")
+    for key, value in results.items():
+        print(f"{key}: {value:.6f}")
+
+    # --------------------------------------------------------------
+    # Save
+    # --------------------------------------------------------------
+
+    if args.output_path is not None:
+        output_path = Path(args.output_path)
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with open(output_path, "w") as f:
+            json.dump(results, f, indent=2)
+
+        print(f"\nSaved results to {output_path}")
 
 
 if __name__ == "__main__":

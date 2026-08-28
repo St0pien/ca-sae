@@ -2,7 +2,6 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -11,10 +10,12 @@ from ca_sae.sae.ca_sae import ClassAlignedSAE
 from ca_sae.eval.empirical_feature_class_map import compute_empirical_feature_class_map
 
 
+@torch.inference_mode()
 def main(
     checkpoint_path: str,
     activations_path: str,
     output_path: str | None = None,
+    permute_m: bool = False,
     batch_size: int = 4096,
     num_workers: int = 4,
     device: str | None = None,
@@ -91,6 +92,9 @@ def main(
 
     # soft_topk operates on the model's class logits.
     M = model.class_matrix
+
+    if permute_m:
+        M = M[torch.randperm(M.shape[0])]
 
     from lapsum.topk import soft_topk
 
@@ -291,6 +295,13 @@ def cli():
     )
 
     parser.add_argument(
+        "--permute-m",
+        default=False,
+        action="store_true",
+        help="Use for perturbing class feature matrix",
+    )
+
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=4096,
@@ -322,6 +333,7 @@ def cli():
         checkpoint_path=args.checkpoint_path,
         activations_path=args.activations_path,
         output_path=args.output_path,
+        permute_m=args.permute_m,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         device=args.device,

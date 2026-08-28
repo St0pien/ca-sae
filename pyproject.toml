@@ -20,6 +20,7 @@ dependencies = [
     "ipywidgets>=8.1.9",
     "matplotlib>=3.11.1",
     "scikit-learn>=1.9.0",
+    "transformers>=5.16.1",
 ]
 
 [build-system]
