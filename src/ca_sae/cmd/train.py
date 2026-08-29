@@ -100,7 +100,7 @@ def make_sae_trainer(steps: int, cfg: SAEConfig) -> SAETrainer:
         raise ValueError(f"Unkown sae config: {cfg.__class__.__name__}")
 
 
-def get_norm_factor(data) -> float:
+def get_norm_factor(data, num_batches: int = 100) -> float:
     """Per Section 3.1, find a fixed scalar factor so activation vectors have unit mean squared norm.
     This is very helpful for hyperparameter transfer between different layers and models.
     Use more steps for more accurate results.
@@ -111,12 +111,17 @@ def get_norm_factor(data) -> float:
     total_mean_squared_norm = 0
     count = 0
 
-    for batch in tqdm(data, total=len(data), desc="Calculating norm factor"):
+    for batch in tqdm(
+        data, total=min(len(data), num_batches), desc="Calculating norm factor"
+    ):
         act_BD = batch[0]
 
         count += 1
         mean_squared_norm = torch.mean(torch.sum(act_BD**2, dim=1))
         total_mean_squared_norm += mean_squared_norm
+
+        if count >= num_batches:
+            break
 
     average_mean_squared_norm = total_mean_squared_norm / count
     norm_factor = torch.sqrt(average_mean_squared_norm).item()
