@@ -88,7 +88,7 @@ def main(
 
     config_dict = {
         "dataset_size": num_images,
-        "clip_embedding_size": clip_embedding_size,
+        "embedding_size": clip_embedding_size,
         "split": split,
     }
     json_path = Path(path, "config.json")

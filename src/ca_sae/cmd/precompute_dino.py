@@ -157,22 +157,12 @@ def main(
     del labels_map
 
     config_dict = {
-        "dataset_size": num_images,
-        "num_tokens": num_tokens,
+        "dataset_size": num_tokens,
         "num_patches": num_patches,
-        "dinov3_embedding_size": embedding_size,
-        "num_register_tokens": num_register_tokens,
+        "embedding_size": embedding_size,
         "split": split,
         "dinov3_variant": dinov3_variant,
         "embedding_type": "last_layer_patch_tokens",
-        "embedding_shape": [
-            num_tokens,
-            embedding_size,
-        ],
-        "labels_shape": [
-            num_tokens,
-        ],
-        "label_assignment": "same_image_class_label_for_every_patch",
     }
 
     json_path = Path(path, "config.json")

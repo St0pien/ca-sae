@@ -20,7 +20,7 @@ class ActivationsDataset(Dataset):
             embeddings_path,
             dtype=np.float16,
             mode="r",
-            shape=(config["dataset_size"], config["clip_embedding_size"]),
+            shape=(config["dataset_size"], config["embedding_size"]),
         )
         self.labels = np.memmap(
             labels_path,
