@@ -222,7 +222,7 @@ class BatchTopKTrainer(SAETrainer):
             active = f[f > 0]
 
             if active.size(0) == 0:
-                min_activation = 0.0
+                min_activation = torch.tensor([0.0], dtype=torch.float)
             else:
                 min_activation = active.min().detach().to(dtype=torch.float32)
 

@@ -12,7 +12,13 @@ import wandb
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.batch_top_k import BatchTopKSAEConfig, BatchTopKTrainer
 from ca_sae.sae.ca_sae import ClassAlignedSAEConfig, ClassAlignedSAETrainer
-from ca_sae.sae.config import AUTOCAST_DTYPE, SAEConfig, TrainConfig, WandbConfig
+from ca_sae.sae.config import (
+    AUTOCAST_DTYPE,
+    SAEConfig,
+    TrainConfig,
+    WandbConfig,
+    DataLoaderConfig,
+)
 from ca_sae.sae.core import SAETrainer
 from ca_sae.sae.softsae import SoftSAEConfig, SoftSAETrainer
 
@@ -222,7 +228,7 @@ def main(cfg: TrainConfig):
 if __name__ == "__main__":
     main(
         TrainConfig(
-            activations_path="activations/imagenet_train_hf",
+            activations_path="activations/imagenet_val_dino",
             # sae=ClassAlignedSAEConfig(
             #     512,
             #     4096,
@@ -235,18 +241,19 @@ if __name__ == "__main__":
             #     agreement_loss_weight=0.15,
             # ),
             sae=BatchTopKSAEConfig(
-                512,
+                768,
                 4096,
                 63,
                 lr=6e-4,
                 decay_start=5000,
             ),
             epochs=30,
-            save_dir="checkpoints/test/asdfasdf",
+            save_dir="checkpoints/test/asdf",
             # wandb=WandbConfig(
             #     entity="st0pien-default-team",
             #     project="CASAE",
             #     name="ca_sae_v2",
             # ),
+            dataloader=DataLoaderConfig(num_workers=4, prefetch_factor=3),
         )
     )

@@ -444,10 +444,4 @@ class ClassAlignedSAETrainer(SAETrainer):
             self.ae.decoder.weight, self.ae.activation_dim, self.ae.dict_size
         )
 
-        if step % 1000 == 0:
-            torch.save(self.ae.class_matrix.cpu().clone(), f"matrices/matrix_{step}.pt")
-            torch.save(
-                self.ae.budget_vector.cpu().clone(), f"matrices/vector_{step}.pt"
-            )
-
         return loss.item()
