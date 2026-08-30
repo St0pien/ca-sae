@@ -327,7 +327,7 @@ class ClassAlignedSAETrainer(SAETrainer):
             return torch.tensor(0, dtype=residual_BD.dtype, device=residual_BD.device)
 
     def get_k_loss(self, estimated_k: torch.Tensor):
-        return estimated_k.mean() / self.ae.dict_size
+        return (estimated_k.mean() / self.ae.dict_size).square()
 
     def get_agreement_loss(
         self, p: torch.Tensor, k_hat: torch.Tensor, labels: torch.Tensor

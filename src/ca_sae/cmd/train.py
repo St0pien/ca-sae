@@ -259,6 +259,6 @@ if __name__ == "__main__":
             #     project="CASAE",
             #     name="ca_sae_v2",
             # ),
-            dataloader=DataLoaderConfig(num_workers=4, prefetch_factor=3),
+            # dataloader=DataLoaderConfig(num_workers=4, prefetch_factor=3),
         )
     )

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
@@ -123,7 +124,7 @@ def extract_features(
     all_features = []
     all_labels = []
 
-    for x, y in loader:
+    for x, y in tqdm(loader):
         x = x.to(device, non_blocking=True).float()
         y = y.to(device, non_blocking=True).long()
 
@@ -193,7 +194,7 @@ def train_linear_probe(
         total_loss = 0.0
         total_examples = 0
 
-        for features, labels in loader:
+        for features, labels in tqdm(loader, leave=False):
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
@@ -255,7 +256,7 @@ def evaluate_probe(
     all_logits = []
     all_labels = []
 
-    for features, labels in loader:
+    for features, labels in tqdm(loader):
         features = features.to(device, non_blocking=True)
 
         logits = probe(features)
