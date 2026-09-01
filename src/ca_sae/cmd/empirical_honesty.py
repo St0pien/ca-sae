@@ -290,8 +290,9 @@ def nanmean(x: torch.Tensor):
 def main(
     architecture: str,
     checkpoint_path: str,
-    train_activations_path: str,
     test_activations_path: str,
+    train_activations_path: str | None,
+    precomputed_train_matrix: str | None,
     output_path: str | None = None,
     rho: float = 5.0,
     num_classes: int = 1000,
@@ -338,17 +339,23 @@ def main(
     # Compute empirical matrix on TRAIN data
     # ------------------------------------------------------------------
 
-    print("\nComputing empirical feature-class matrix on training data...")
-
-    train_A, total_train_examples = compute_empirical_matrix(
-        activations_path=train_activations_path,
-        model=model,
-        num_classes=num_classes,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        device=device,
-        max_examples=max_train_examples,
-    )
+    if train_activations_path is not None:
+        print("\nComputing empirical feature-class matrix on training data...")
+        train_A, total_train_examples = compute_empirical_matrix(
+            activations_path=train_activations_path,
+            model=model,
+            num_classes=num_classes,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            device=device,
+            max_examples=max_train_examples,
+        )
+    else:
+        print(
+            f"Loading precomputed empirical feature-class matrix from: {precomputed_train_matrix}"
+        )
+        train_A = torch.load(precomputed_train_matrix).to(device)
+        total_train_examples = -1
 
     # ------------------------------------------------------------------
     # Compute empirical matrix on TEST data
@@ -629,11 +636,20 @@ def cli():
         help="Path to the trained SAE checkpoint.",
     )
 
-    parser.add_argument(
+    matrix_args = parser.add_mutually_exclusive_group(required=True)
+
+    matrix_args.add_argument(
         "--train-activations-path",
         type=str,
-        required=True,
+        default=None,
         help="Path to the training ActivationsDataset directory.",
+    )
+
+    matrix_args.add_argument(
+        "--precomputed-matrix",
+        type=str,
+        default=None,
+        help="Path to the precomputed empirical feature-class training matrix",
     )
 
     parser.add_argument(
@@ -715,6 +731,7 @@ def cli():
         architecture=args.architecture,
         checkpoint_path=args.checkpoint_path,
         train_activations_path=args.train_activations_path,
+        precomputed_train_matrix=args.precomputed_matrix,
         test_activations_path=args.test_activations_path,
         output_path=args.output_path,
         rho=args.rho,
