@@ -28,6 +28,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         num_classes: int,
         features_per_class: int,
         alpha: float,
+        tau: float = 1.0,
     ):
         super().__init__()
         self.activation_dim = activation_dim
@@ -36,6 +37,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         self.features_per_class = features_per_class
 
         self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+        self.register_buffer("tau", torch.tensor(tau, dtype=torch.float32))
         self.register_buffer("norm_factor", torch.tensor(1.0))
 
         self.decoder = nn.Linear(dict_size, activation_dim, bias=False)
@@ -148,6 +150,8 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         # alpha is a registered scalar buffer, so it is recoverable.
         alpha = state_dict["alpha"].item()
 
+        tau = state_dict["tau"].item() if "tau" in state_dict else 1.0
+
         with open(f"{path}/config.json") as f_config:
             json_config = json.load(f_config)
             features_per_class = json_config["sae"]["features_per_class"]
@@ -158,6 +162,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
             num_classes=num_classes,
             features_per_class=features_per_class,
             alpha=alpha,
+            tau=tau,
         )
 
         model.load_state_dict(state_dict)
@@ -175,6 +180,9 @@ class ClassAlignedSAEConfig(SAEConfig):
     num_classes: int = 1000
     features_per_class: int = 5
     agreement_loss_weight: float = 1.0
+    agreement_tau: float = 1.0
+    tau_anneal_start: float = 50.0
+    tau_anneal_steps: Optional[int] = None
 
 
 class ClassAlignedSAETrainer(SAETrainer):
@@ -198,6 +206,7 @@ class ClassAlignedSAETrainer(SAETrainer):
             cfg.num_classes,
             cfg.features_per_class,
             cfg.soft_topk_alpha,
+            cfg.agreement_tau,
         )
 
         if cfg.lr is not None:
@@ -222,6 +231,7 @@ class ClassAlignedSAETrainer(SAETrainer):
             "k_loss",
             "agreement_loss",
             "ae_soft_topk_alpha",
+            "ae_tau",
             "use_hard_topk",
             "lr_log",
             "avg_enc_grad",
@@ -238,6 +248,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.use_hard_topk = 0
         self.avg_enc_grad = 0
         self.avg_mlp_grad = 0
+        self.ae_tau = cfg.tau_anneal_start
 
         ### LOGGING SETUP
 
@@ -289,6 +300,21 @@ class ClassAlignedSAETrainer(SAETrainer):
         ratio = step / alpha_anneal_steps
         annealed_value = (1 - ratio) + self.soft_topk_alpha * ratio
         self.ae.alpha.fill_(annealed_value)
+
+    def update_annealed_tau(self, step: int, tau_anneal_steps: Optional[int] = None):
+        if tau_anneal_steps is None or tau_anneal_steps == 0:
+            return
+
+        assert (
+            0 <= tau_anneal_steps < self.steps
+        ), "tau_anneal_steps must be >= 0 and < steps."
+
+        step = min(step, tau_anneal_steps)
+        ratio = step / tau_anneal_steps
+        annealed_value = (
+            self.tau_anneal_start * (1 - ratio) + self.agreement_tau * ratio
+        )
+        self.ae.tau.fill_(annealed_value)
 
     def get_auxiliary_loss(
         self, residual_BD: torch.Tensor, post_relu_acts_BF: torch.Tensor
@@ -343,17 +369,25 @@ class ClassAlignedSAETrainer(SAETrainer):
         self, p: torch.Tensor, k_hat: torch.Tensor, labels: torch.Tensor
     ):
         # Normalize feature_selection mass
-        pi = p / k_hat.unsqueeze(-1)
+        pi = p / k_hat.unsqueeze(-1)  # [B, d]
 
         # Get M matrix
-        M = self.ae.calculate_M()
+        M = self.ae.calculate_M()  # [d, C]
 
-        # Get ground truth classes for selected features
-        M_class = M[:, labels].T
+        # Scores against every class, not just the true one
+        s = pi @ M  # [B, C]
 
-        agreement = (pi * M_class).sum(dim=1)
+        tau = self.ae.tau
 
-        return -agreement.mean()
+        # True-class score
+        s_true = s.gather(1, labels.unsqueeze(-1)).squeeze(-1)  # [B]
+
+        # Contrastive form: -s_cb/tau + logsumexp(s/tau)
+        log_denom = torch.logsumexp(s / tau, dim=1)  # [B]
+
+        loss = -s_true / tau + log_denom
+
+        return loss.mean()
 
     def loss(self, x, y, step=None, logging=False):
         f_soft, active_indices_F, post_relu_acts, weights, k_hat = self.ae.encode(
@@ -379,6 +413,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.min_k = k_hat.min()
         self.max_k = k_hat.max()
         self.ae_soft_topk_alpha = self.ae.alpha.item()
+        self.ae_tau = self.ae.tau.item()
         self.lr_log = self.scheduler.get_last_lr()[0]
 
         l2_loss = e.pow(2).sum(dim=-1).mean()
@@ -443,6 +478,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.scheduler.step()
         self.update_annealed_k(step, self.ae.activation_dim, self.k_anneal_steps)
         self.update_annealed_alpha(step, self.alpha_anneal_steps)
+        self.update_annealed_tau(step, self.tau_anneal_steps)
 
         # Make sure the decoder is still unit-norm
         self.ae.decoder.weight.data = set_decoder_norm_to_unit_norm(
