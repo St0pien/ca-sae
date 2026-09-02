@@ -9,7 +9,7 @@ from lapsum.topk import soft_topk
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.empirical_feature_class_map import (
+from ca_sae.eval.posthoc_M import (
     compute_empirical_feature_class_map,
 )
 

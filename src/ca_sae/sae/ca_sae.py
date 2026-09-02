@@ -64,6 +64,16 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         k_hat = logit * self.dict_size
         return torch.clamp(k_hat, min=1, max=self.dict_size)
 
+    def calculate_M(self):
+        Ktot = self.features_per_class * self.dict_size
+
+        # Compute per feature association budget
+        k = Ktot * torch.softmax(self.budget_vector, dim=0)
+
+        M = soft_topk(self.class_matrix, k.unsqueeze(-1), self.alpha, dim=1)
+
+        return M
+
     def encode(self, x: torch.Tensor, return_active: bool = False, use_hard_topk=True):
         post_relu_feat_acts = F.relu(self.encoder(x - self.b_dec))
 
@@ -335,13 +345,8 @@ class ClassAlignedSAETrainer(SAETrainer):
         # Normalize feature_selection mass
         pi = p / k_hat.unsqueeze(-1)
 
-        # Total association budget
-        Ktot = self.ae.features_per_class * self.ae.dict_size
-
-        # Compute per feature association budget
-        k = Ktot * torch.softmax(self.ae.budget_vector, dim=0)
-
-        M = soft_topk(self.ae.class_matrix, k.unsqueeze(-1), self.ae.alpha, dim=1)
+        # Get M matrix
+        M = self.ae.calculate_M()
 
         # Get ground truth classes for selected features
         M_class = M[:, labels].T

@@ -1,34 +1,17 @@
 import torch
 from torch.utils.data.dataloader import DataLoader
+from dataclasses import dataclass
 from tqdm import tqdm
 
 from ca_sae.sae.core import Dictionary
 
 
-def compute_empirical_feature_class_map(
+def compute_empirical_matrix(
     model: Dictionary,
     loader: DataLoader,
     num_classes: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """
-    Compute the empirical feature-class selection map.
-
-    For each dictionary feature i and class c:
-
-        A[i, c] = P(feature i is selected | class = c)
-
-    using the model's actual hard Top-k inference-time selection.
-
-    Returns:
-        empirical_A:
-            Tensor of shape [dict_size, num_classes].
-        class_counts:
-            Tensor of shape [num_classes], containing the number of
-            examples observed for each class.
-        total_examples:
-            Total number of examples processed.
-    """
     d = model.dict_size
     c = num_classes
 
@@ -78,3 +61,17 @@ def compute_empirical_feature_class_map(
     empirical_A = feature_class_counts / class_counts.clamp_min(1.0).unsqueeze(0)
 
     return empirical_A, class_counts, total_examples
+
+
+def build_posthoc_M(
+    empirical_A: torch.Tensor, rho: float = 5.0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dict_size = empirical_A.shape[0]
+
+    empirical_k = empirical_A.sum(dim=1)
+
+    tau = empirical_k.mean() / dict_size
+
+    empirical_k = (empirical_A * (empirical_A > tau)).sum(dim=1) / empirical_A.sum()
+
+    return empirical_A, empirical_k * dict_size * rho

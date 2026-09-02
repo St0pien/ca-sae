@@ -6,8 +6,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from ca_sae.dataset import ActivationsDataset
+from ca_sae.eval.matrix_honesty import calculate_matrix_honesty
 from ca_sae.sae.ca_sae import ClassAlignedSAE
-from ca_sae.eval.empirical_feature_class_map import compute_empirical_feature_class_map
+from ca_sae.eval.posthoc_M import compute_empirical_matrix, build_posthoc_M
 
 
 @torch.inference_mode()
@@ -73,7 +74,7 @@ def main(
         pin_memory=device.type == "cuda",
     )
 
-    empirical_A, _, total_examples = compute_empirical_feature_class_map(
+    test_A, _, total_examples = compute_empirical_matrix(
         model=model, loader=loader, num_classes=model.num_classes, device=device
     )
 
@@ -83,6 +84,8 @@ def main(
     # This mirrors ClassAlignedSAETrainer.get_agreement_loss().
     # ------------------------------------------------------------------
 
+    test_posthoc_M, test_posthoc_k = build_posthoc_M(test_A, model.features_per_class)
+
     Ktot = model.features_per_class * d
 
     k = Ktot * torch.softmax(
@@ -91,89 +94,14 @@ def main(
     )
 
     # soft_topk operates on the model's class logits.
-    M = model.class_matrix
+    M = model.calculate_M()
 
     if permute_m:
-        M = M[torch.randperm(M.shape[0])]
+        perm = torch.randperm(M.shape[0])
+        M = M[perm]
+        k = k[perm]
 
-    from lapsum.topk import soft_topk
-
-    M = soft_topk(
-        M,
-        k.unsqueeze(-1),
-        model.alpha,
-        dim=1,
-    ).to(torch.float64)
-
-    # ------------------------------------------------------------------
-    # Cosine similarity between learned M[i,:] and empirical A[i,:].
-    # ------------------------------------------------------------------
-
-    M_norm = M.norm(dim=1)
-    A_norm = empirical_A.norm(dim=1)
-
-    cosine = (M * empirical_A).sum(dim=1) / (M_norm * A_norm).clamp_min(1e-12)
-
-    valid_features = (M_norm > 0) & (A_norm > 0)
-
-    valid_cosine = cosine[valid_features]
-
-    # ------------------------------------------------------------------
-    # Top-ceil(k_i) claimed-class precision / recall / F1.
-    #
-    # M tells us which classes feature i claims.
-    #
-    # A tells us which classes feature i is actually selected for.
-    #
-    # We use the top ceil(k_i) classes from A as the empirical
-    # "ground-truth" class set.
-    # ------------------------------------------------------------------
-
-    precision = torch.zeros(d, dtype=torch.float64, device=device)
-    recall = torch.zeros(d, dtype=torch.float64, device=device)
-    f1 = torch.zeros(d, dtype=torch.float64, device=device)
-
-    claimed_k = torch.ceil(k).long().clamp(min=1, max=c)
-
-    for i in range(d):
-        ki = int(claimed_k[i])
-
-        predicted = torch.topk(
-            M[i],
-            k=ki,
-            dim=0,
-        ).indices
-
-        actual = torch.topk(
-            empirical_A[i],
-            k=ki,
-            dim=0,
-        ).indices
-
-        predicted_set = torch.zeros(
-            c,
-            dtype=torch.bool,
-            device=device,
-        )
-        actual_set = torch.zeros(
-            c,
-            dtype=torch.bool,
-            device=device,
-        )
-
-        predicted_set[predicted] = True
-        actual_set[actual] = True
-
-        tp = (predicted_set & actual_set).sum().float()
-
-        p = tp / float(ki)
-        r = tp / float(ki)
-
-        precision[i] = p
-        recall[i] = r
-
-        if p + r > 0:
-            f1[i] = 2 * p * r / (p + r)
+    matrix_honesty = calculate_matrix_honesty(M, k, test_posthoc_M, test_posthoc_k)
 
     # ------------------------------------------------------------------
     # Summary
@@ -187,11 +115,14 @@ def main(
         "mean_feature_budget": float(k.mean()),
         "min_feature_budget": float(k.min()),
         "max_feature_budget": float(k.max()),
-        "mean_cosine": float(valid_cosine.mean()),
-        "median_cosine": float(valid_cosine.median()),
-        "mean_precision_at_ceil_k": float(precision.mean()),
-        "mean_recall_at_ceil_k": float(recall.mean()),
-        "mean_f1_at_ceil_k": float(f1.mean()),
+        "mean_feature_test_budget": float(test_posthoc_k.mean()),
+        "min_feature_test_budget": float(test_posthoc_k.min()),
+        "max_feature_test_budget": float(test_posthoc_k.max()),
+        "mean_cosine": matrix_honesty.cosine.mean(),
+        "median_cosine": matrix_honesty.cosine.median(),
+        "mean_precision_at_ceil_k": matrix_honesty.precision.mean(),
+        "mean_recall_at_ceil_k": matrix_honesty.recall.mean(),
+        "mean_f1_at_ceil_k": matrix_honesty.f1.mean(),
     }
 
     print("\n=== SoftSAE-CA Honesty Evaluation ===")
@@ -203,12 +134,12 @@ def main(
     print(f"Min feature budget:    {k.min().item():.3f}")
     print(f"Max feature budget:    {k.max().item():.3f}")
     print()
-    print(f"Mean cosine(M, A):     {valid_cosine.mean().item():.4f}")
-    print(f"Median cosine(M, A):   {valid_cosine.median().item():.4f}")
+    print(f"Mean cosine:           {matrix_honesty.cosine.mean().item():.4f}")
+    print(f"Median cosine:         {matrix_honesty.cosine.median().item():.4f}")
     print()
-    print(f"Precision @ ceil(k):   {precision.mean().item():.4f}")
-    print(f"Recall @ ceil(k):      {recall.mean().item():.4f}")
-    print(f"F1 @ ceil(k):          {f1.mean().item():.4f}")
+    print(f"Precision @ ceil(k):   {matrix_honesty.precision.mean().item():.4f}")
+    print(f"Recall @ ceil(k):      {matrix_honesty.recall.mean().item():.4f}")
+    print(f"F1 @ ceil(k):          {matrix_honesty.f1.mean().item():.4f}")
 
     # ------------------------------------------------------------------
     # Per-feature output.
@@ -217,15 +148,17 @@ def main(
     per_feature = []
 
     M_cpu = M.cpu()
-    A_cpu = empirical_A.cpu()
+    posthoc_M_cpu = test_posthoc_M.cpu()
     k_cpu = k.cpu()
-    cosine_cpu = cosine.cpu()
-    precision_cpu = precision.cpu()
-    recall_cpu = recall.cpu()
-    f1_cpu = f1.cpu()
+    posthoc_k_cpu = test_posthoc_k.cpu()
+    cosine_cpu = matrix_honesty.cosine.cpu()
+    precision_cpu = matrix_honesty.precision.cpu()
+    recall_cpu = matrix_honesty.recall.cpu()
+    f1_cpu = matrix_honesty.f1.cpu()
 
     for i in range(d):
         ki = int(torch.ceil(k_cpu[i]).clamp(1, c))
+        ki_posthoc = int(torch.ceil(posthoc_k_cpu[i]).clamp(1, c))
 
         claimed_classes = torch.topk(
             M_cpu[i],
@@ -233,8 +166,8 @@ def main(
         ).indices.tolist()
 
         empirical_classes = torch.topk(
-            A_cpu[i],
-            k=ki,
+            posthoc_M_cpu[i],
+            k=ki_posthoc,
         ).indices.tolist()
 
         per_feature.append(
