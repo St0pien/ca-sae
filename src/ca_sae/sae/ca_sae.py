@@ -200,6 +200,10 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.soft_topk_alpha = cfg.soft_topk_alpha
         self.alpha_anneal_steps = cfg.alpha_anneal_steps
 
+        self.agreement_tau = cfg.agreement_tau
+        self.tau_anneal_start = cfg.tau_anneal_start
+        self.tau_anneal_steps = cfg.tau_anneal_steps
+
         self.ae = ClassAlignedSAE(
             cfg.activation_dim,
             cfg.dict_size,
