@@ -9,7 +9,6 @@ from tqdm import tqdm
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
-from ca_sae.sae.ca_sae import ClassAlignedSAE
 
 
 def topk_sparse(x: torch.Tensor, k: int) -> torch.Tensor:

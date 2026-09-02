@@ -1,0 +1,98 @@
+{
+  "num_examples": 50000,
+  "num_features": 4096,
+  "num_classes": 1000,
+  "probe": {
+    "type": "linear_softmax",
+    "input": "SAE encoded latent z",
+    "epochs": 10,
+    "learning_rate": 0.01,
+    "weight_decay": 0.0001
+  },
+  "baseline": {
+    "accuracy": 0.73266,
+    "top5_accuracy": 0.93238
+  },
+  "association_budget": {
+    "total_K": 20480.0,
+    "mean_feature_budget": 5.0,
+    "min_feature_budget": 0.0,
+    "max_feature_budget": 996.0
+  },
+  "editing": {
+    "add_mode": "random",
+    "add_constant": 1.0,
+    "class_groups": false
+  },
+  "interventions": {
+    "remove": {
+      "edit_strength": 4.930426171875,
+      "mean_remove_probability_change": -0.6055866329574585,
+      "mean_abs_remove_probability_change": 0.6075611336898804,
+      "mean_add_probability_change": 0.0005081376445665956,
+      "mean_abs_add_probability_change": 0.0009730082565918565,
+      "mean_remove_logit_change": -14.454284300231933,
+      "mean_add_logit_change": 0.12748982372164727,
+      "remove_probability_decreased_rate": 0.9798400003433227,
+      "add_probability_increased_rate": 0.973060000038147,
+      "remove_prediction_drop_rate": 0.6117999998092651,
+      "add_prediction_gain_rate": 0.0006400000002980233,
+      "mean_add_rank_before": 502.30528020507813,
+      "mean_add_rank_after": 501.59179989257814,
+      "add_top5_rate_before": 0.0038000000020861624,
+      "add_top5_rate_after": 0.004520000001192093,
+      "remove_top5_rate_before": 0.9323799998092651,
+      "remove_top5_rate_after": 0.28254000017166137,
+      "semantic_target_acquisition_rate": 0.0007600000005960465,
+      "mean_abs_probability_change_unrelated": 0.001012497699931264,
+      "mean_total_probability_mass_moved": 1.619006822052002,
+      "mean_prediction_changed": 0.7851000000572205
+    },
+    "add": {
+      "edit_strength": 4.720046083984375,
+      "mean_remove_probability_change": -0.2656816109657288,
+      "mean_abs_remove_probability_change": 0.30608886684417724,
+      "mean_add_probability_change": 0.30358611231803895,
+      "mean_abs_add_probability_change": 0.30359395394325256,
+      "mean_remove_logit_change": -0.4460171290588379,
+      "mean_add_logit_change": 18.060487709960938,
+      "remove_probability_decreased_rate": 0.8037199997901916,
+      "add_probability_increased_rate": 0.9988200004577636,
+      "remove_prediction_drop_rate": 0.3138399998569488,
+      "add_prediction_gain_rate": 0.31810000023841856,
+      "mean_add_rank_before": 502.30528020507813,
+      "mean_add_rank_after": 13.599360010986327,
+      "add_top5_rate_before": 0.0038000000020861624,
+      "add_top5_rate_after": 0.665539999961853,
+      "remove_top5_rate_before": 0.9323799998092651,
+      "remove_top5_rate_after": 0.813500000667572,
+      "semantic_target_acquisition_rate": 0.3184200002861023,
+      "mean_abs_probability_change_unrelated": 0.00038702593205496667,
+      "mean_total_probability_mass_moved": 0.9959347020530701,
+      "mean_prediction_changed": 0.5035000000572205
+    },
+    "remove_add": {
+      "edit_strength": 6.61467951171875,
+      "mean_remove_probability_change": -0.6650375030326843,
+      "mean_abs_remove_probability_change": 0.6657740949058533,
+      "mean_add_probability_change": 0.655250735206604,
+      "mean_abs_add_probability_change": 0.6552654668235779,
+      "mean_remove_logit_change": -14.495940333251953,
+      "mean_add_logit_change": 18.18983575073242,
+      "remove_probability_decreased_rate": 0.9943000007247925,
+      "add_probability_increased_rate": 0.9997600004577637,
+      "remove_prediction_drop_rate": 0.7175399999809265,
+      "add_prediction_gain_rate": 0.7224199998664856,
+      "mean_add_rank_before": 502.30528020507813,
+      "mean_add_rank_after": 3.9201000004577637,
+      "add_top5_rate_before": 0.0038000000020861624,
+      "add_top5_rate_after": 0.9097600004386902,
+      "remove_top5_rate_before": 0.9323799998092651,
+      "remove_top5_rate_after": 0.09537999999523163,
+      "semantic_target_acquisition_rate": 0.7227200004196167,
+      "mean_abs_probability_change_unrelated": 0.0005971458838693798,
+      "mean_total_probability_mass_moved": 1.916991114692688,
+      "mean_prediction_changed": 0.9669399999427796
+    }
+  }
+}

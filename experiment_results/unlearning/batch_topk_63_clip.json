@@ -1,0 +1,95 @@
+{
+  "num_examples": 50000,
+  "num_features": 4096,
+  "num_classes": 1000,
+  "probe": {
+    "type": "linear_softmax",
+    "input": "SAE encoded latent z",
+    "epochs": 10,
+    "learning_rate": 0.01,
+    "weight_decay": 0.0001
+  },
+  "baseline": {
+    "accuracy": 0.7336,
+    "top5_accuracy": 0.93234
+  },
+  "association_budget": {
+    "total_K": 20480.0,
+    "mean_feature_budget": 5.0,
+    "min_feature_budget": 0.0,
+    "max_feature_budget": 706.0
+  },
+  "editing": {
+    "add_mode": "random",
+    "add_constant": 1.0,
+    "class_groups": false
+  },
+  "interventions": {
+    "remove": {
+      "mean_remove_probability_change": -0.6472567581939698,
+      "mean_abs_remove_probability_change": 0.6480200193595886,
+      "mean_add_probability_change": 0.0006865967588685453,
+      "mean_abs_add_probability_change": 0.001079259702321142,
+      "mean_remove_logit_change": -15.331502548828125,
+      "mean_add_logit_change": 0.08091721645355225,
+      "remove_probability_decreased_rate": 0.9867800002670288,
+      "add_probability_increased_rate": 0.973959999961853,
+      "remove_prediction_drop_rate": 0.6847400004005432,
+      "add_prediction_gain_rate": 0.00096,
+      "mean_add_rank_before": 500.0805203613281,
+      "mean_add_rank_after": 499.75988010742185,
+      "add_top5_rate_before": 0.004240000001788139,
+      "add_top5_rate_after": 0.00482000000089407,
+      "remove_top5_rate_before": 0.9323400005531312,
+      "remove_top5_rate_after": 0.15909999999523164,
+      "semantic_target_acquisition_rate": 0.0011,
+      "mean_abs_probability_change_unrelated": 0.001080427827872336,
+      "mean_total_probability_mass_moved": 1.7273662363815308,
+      "mean_prediction_changed": 0.8732600002861023
+    },
+    "add": {
+      "mean_remove_probability_change": -0.30709408615112305,
+      "mean_abs_remove_probability_change": 0.34286843010902407,
+      "mean_add_probability_change": 0.3232210609912872,
+      "mean_abs_add_probability_change": 0.32322947407722474,
+      "mean_remove_logit_change": -0.6034511894416809,
+      "mean_add_logit_change": 19.216473377075197,
+      "remove_probability_decreased_rate": 0.8528600006103516,
+      "add_probability_increased_rate": 0.9999,
+      "remove_prediction_drop_rate": 0.35672000030517576,
+      "add_prediction_gain_rate": 0.344920000295639,
+      "mean_add_rank_before": 500.0805203613281,
+      "mean_add_rank_after": 5.98704,
+      "add_top5_rate_before": 0.004240000001788139,
+      "add_top5_rate_after": 0.7656000003623963,
+      "remove_top5_rate_before": 0.9323400005531312,
+      "remove_top5_rate_after": 0.771660000076294,
+      "semantic_target_acquisition_rate": 0.345200000295639,
+      "mean_abs_probability_change_unrelated": 0.000439586462713778,
+      "mean_total_probability_mass_moved": 1.1048051804351806,
+      "mean_prediction_changed": 0.5595999996566773
+    },
+    "remove_add": {
+      "mean_remove_probability_change": -0.6747235112190246,
+      "mean_abs_remove_probability_change": 0.6751168120765686,
+      "mean_add_probability_change": 0.7529913661956787,
+      "mean_abs_add_probability_change": 0.7529954091644288,
+      "mean_remove_logit_change": -15.329156495361328,
+      "mean_add_logit_change": 19.296660731811524,
+      "remove_probability_decreased_rate": 0.9966600004577637,
+      "add_probability_increased_rate": 0.99994,
+      "remove_prediction_drop_rate": 0.7302200004768371,
+      "add_prediction_gain_rate": 0.8283000006484985,
+      "mean_add_rank_before": 500.0805203613281,
+      "mean_add_rank_after": 1.5579799997711181,
+      "add_top5_rate_before": 0.004240000001788139,
+      "add_top5_rate_after": 0.9761800006866455,
+      "remove_top5_rate_before": 0.9323400005531312,
+      "remove_top5_rate_after": 0.04460000002741814,
+      "semantic_target_acquisition_rate": 0.8285600006484986,
+      "mean_abs_probability_change_unrelated": 0.0005308974257297814,
+      "mean_total_probability_mass_moved": 1.9579478174591065,
+      "mean_prediction_changed": 0.9867799999809265
+    }
+  }
+}

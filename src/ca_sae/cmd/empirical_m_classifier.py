@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from lapsum.topk import soft_topk
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
@@ -135,11 +136,13 @@ def build_posthoc_matrix(
             dim=0,
         )
 
-        posthoc_M = torch.zeros_like(train_A)
+        hard_M = torch.zeros_like(train_A)
 
-        posthoc_M.flatten()[top_indices] = 1.0
+        hard_M.flatten()[top_indices] = 1.0
 
-        k = posthoc_M.sum(dim=1)
+        k = hard_M.sum(dim=1)
+
+        posthoc_M = soft_topk(train_A, k.unsqueeze(1), 0.001)
 
         return posthoc_M, k
 

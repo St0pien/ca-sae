@@ -1,0 +1,95 @@
+{
+  "num_examples": 50000,
+  "num_features": 4096,
+  "num_classes": 1000,
+  "probe": {
+    "type": "linear_softmax",
+    "input": "SAE encoded latent z",
+    "epochs": 10,
+    "learning_rate": 0.01,
+    "weight_decay": 0.0001
+  },
+  "baseline": {
+    "accuracy": 0.731,
+    "top5_accuracy": 0.93248
+  },
+  "association_budget": {
+    "total_K": 20480.0,
+    "mean_feature_budget": 5.0,
+    "min_feature_budget": 0.1905776858329773,
+    "max_feature_budget": 635.5501708984375
+  },
+  "editing": {
+    "add_mode": "random",
+    "add_constant": 1.0,
+    "class_groups": false
+  },
+  "interventions": {
+    "remove": {
+      "mean_remove_probability_change": -0.4913631704521179,
+      "mean_abs_remove_probability_change": 0.5014066902923584,
+      "mean_add_probability_change": 0.0005013367351237684,
+      "mean_abs_add_probability_change": 0.0008137487517483532,
+      "mean_remove_logit_change": -10.326246179504395,
+      "mean_add_logit_change": 0.01819606626570225,
+      "remove_probability_decreased_rate": 0.9241199997901917,
+      "add_probability_increased_rate": 0.920500000629425,
+      "remove_prediction_drop_rate": 0.5063399997711182,
+      "add_prediction_gain_rate": 0.00068,
+      "mean_add_rank_before": 501.63594,
+      "mean_add_rank_after": 501.3372999511719,
+      "add_top5_rate_before": 0.0042600000005960465,
+      "add_top5_rate_after": 0.004980000000596047,
+      "remove_top5_rate_before": 0.9324800003623962,
+      "remove_top5_rate_after": 0.4873799999332428,
+      "semantic_target_acquisition_rate": 0.00086,
+      "mean_abs_probability_change_unrelated": 0.0007731930446065962,
+      "mean_total_probability_mass_moved": 1.2738670756149293,
+      "mean_prediction_changed": 0.6351999998474122
+    },
+    "add": {
+      "mean_remove_probability_change": -0.2688902379608154,
+      "mean_abs_remove_probability_change": 0.31037826546669006,
+      "mean_add_probability_change": 0.3494035999107361,
+      "mean_abs_add_probability_change": 0.3494319131565094,
+      "mean_remove_logit_change": -0.37844056518554686,
+      "mean_add_logit_change": 16.983341299438475,
+      "remove_probability_decreased_rate": 0.7750000006866455,
+      "add_probability_increased_rate": 0.9517400004005432,
+      "remove_prediction_drop_rate": 0.3208800000667572,
+      "add_prediction_gain_rate": 0.3640199998664856,
+      "mean_add_rank_before": 501.63594,
+      "mean_add_rank_after": 69.95003998779296,
+      "add_top5_rate_before": 0.0042600000005960465,
+      "add_top5_rate_after": 0.6145800003242493,
+      "remove_top5_rate_before": 0.9324800003623962,
+      "remove_top5_rate_after": 0.8199800000190735,
+      "semantic_target_acquisition_rate": 0.3642999998664856,
+      "mean_abs_probability_change_unrelated": 0.0003380499117821455,
+      "mean_total_probability_mass_moved": 0.9971839916992188,
+      "mean_prediction_changed": 0.5074000002193451
+    },
+    "remove_add": {
+      "mean_remove_probability_change": -0.5892598314094544,
+      "mean_abs_remove_probability_change": 0.5959026810455322,
+      "mean_add_probability_change": 0.5548673775672912,
+      "mean_abs_add_probability_change": 0.5549141971778869,
+      "mean_remove_logit_change": -10.302588562316895,
+      "mean_add_logit_change": 17.00161074584961,
+      "remove_probability_decreased_rate": 0.9628799997711182,
+      "add_probability_increased_rate": 0.9920200001716614,
+      "remove_prediction_drop_rate": 0.6352600005149841,
+      "add_prediction_gain_rate": 0.5904399998283386,
+      "mean_add_rank_before": 501.63594,
+      "mean_add_rank_after": 60.3731599633789,
+      "add_top5_rate_before": 0.0042600000005960465,
+      "add_top5_rate_after": 0.70834,
+      "remove_top5_rate_before": 0.9324800003623962,
+      "remove_top5_rate_after": 0.3211800000190735,
+      "semantic_target_acquisition_rate": 0.5906999998283387,
+      "mean_abs_probability_change_unrelated": 0.0005313612274453044,
+      "mean_total_probability_mass_moved": 1.6811153805541992,
+      "mean_prediction_changed": 0.8501000006103515
+    }
+  }
+}
