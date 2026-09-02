@@ -93,7 +93,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
             weights_for_agreement = soft_topk(
                 post_relu_feat_acts,
                 k_hat.detach().view(k_hat.shape[0], 1),
-                self.ae.alpha.item(),
+                self.alpha.item(),
             )
 
         if return_active:
