@@ -72,7 +72,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         # Compute per feature association budget
         k = Ktot * torch.softmax(self.budget_vector, dim=0)
 
-        M = soft_topk(self.class_matrix, k.unsqueeze(-1), self.alpha.item(), dim=1)
+        M = soft_topk(self.class_matrix, k.unsqueeze(-1), self.alpha.clone(), dim=1)
 
         return M
 
@@ -86,14 +86,14 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         else:
             k_hat = self.estimate_k(x)
             weights = soft_topk(
-                post_relu_feat_acts, k_hat.view(k_hat.shape[0], 1), self.alpha.item()
+                post_relu_feat_acts, k_hat.view(k_hat.shape[0], 1), self.alpha.clone()
             )
             encoded_acts = post_relu_feat_acts * weights
 
             weights_for_agreement = soft_topk(
                 post_relu_feat_acts,
                 k_hat.detach().view(k_hat.shape[0], 1),
-                self.alpha.item(),
+                self.alpha.clone(),
             )
 
         if return_active:
@@ -428,7 +428,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.avg_k = k_hat.mean(dtype=torch.float32)
         self.min_k = k_hat.min()
         self.max_k = k_hat.max()
-        self.ae_soft_topk_alpha = self.ae.alpha.item()
+        self.ae_soft_topk_alpha = self.ae.alpha.clone()
         self.ae_tau = self.ae.tau.item()
         self.lr_log = self.scheduler.get_last_lr()[0]
 
