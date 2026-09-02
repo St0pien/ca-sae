@@ -373,7 +373,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         self, p: torch.Tensor, k_hat: torch.Tensor, labels: torch.Tensor
     ):
         # Normalize feature_selection mass
-        pi = p / k_hat.unsqueeze(-1)  # [B, d]
+        pi = p / k_hat.unsqueeze(-1).detach()  # [B, d]
 
         # Get M matrix
         M = self.ae.calculate_M()  # [d, C]
