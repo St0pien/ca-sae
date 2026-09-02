@@ -72,7 +72,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         # Compute per feature association budget
         k = Ktot * torch.softmax(self.budget_vector, dim=0)
 
-        M = soft_topk(self.class_matrix, k.unsqueeze(-1), self.alpha, dim=1)
+        M = soft_topk(self.class_matrix, k.unsqueeze(-1), self.alpha.item(), dim=1)
 
         return M
 
@@ -86,9 +86,15 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         else:
             k_hat = self.estimate_k(x)
             weights = soft_topk(
-                post_relu_feat_acts, k_hat.view(k_hat.shape[0], 1), self.alpha.clone()
+                post_relu_feat_acts, k_hat.view(k_hat.shape[0], 1), self.alpha.item()
             )
             encoded_acts = post_relu_feat_acts * weights
+
+            weights_for_agreement = soft_topk(
+                post_relu_feat_acts,
+                k_hat.detach().view(k_hat.shape[0], 1),
+                self.ae.alpha.item(),
+            )
 
         if return_active:
             return (
@@ -96,6 +102,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
                 encoded_acts.sum(0) > 0,
                 post_relu_feat_acts,
                 weights,
+                weights_for_agreement,
                 k_hat,
             )
         else:
@@ -394,9 +401,14 @@ class ClassAlignedSAETrainer(SAETrainer):
         return loss.mean()
 
     def loss(self, x, y, step=None, logging=False):
-        f_soft, active_indices_F, post_relu_acts, weights, k_hat = self.ae.encode(
-            x, return_active=True, use_hard_topk=False
-        )
+        (
+            f_soft,
+            active_indices_F,
+            post_relu_acts,
+            weights,
+            weights_for_agreement,
+            k_hat,
+        ) = self.ae.encode(x, return_active=True, use_hard_topk=False)
 
         with torch.no_grad():
             f_hard = self.ae.encode(x, use_hard_topk=True)
@@ -425,7 +437,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         k_loss = self.get_k_loss(k_hat)
         self.k_loss = k_loss
 
-        agreement_loss = self.get_agreement_loss(weights, k_hat, y)
+        agreement_loss = self.get_agreement_loss(weights_for_agreement, k_hat, y)
         self.agreement_loss = agreement_loss
 
         loss = (
