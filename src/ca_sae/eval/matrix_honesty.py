@@ -27,8 +27,8 @@ def calculate_matrix_honesty(
     recall = torch.zeros(d, dtype=torch.float64, device=pred_M.device)
     f1 = torch.zeros(d, dtype=torch.float64, device=pred_M.device)
 
-    claimed_k = torch.ceil(pred_k).long().clamp(min=0, max=c)
-    target_claimed_k = torch.ceil(target_k).long().clamp(min=0, max=c)
+    claimed_k = torch.ceil(pred_k).long().clamp(min=1, max=c)
+    target_claimed_k = torch.ceil(target_k).long().clamp(min=1, max=c)
 
     for i in range(d):
         ki = int(claimed_k[i])

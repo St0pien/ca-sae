@@ -1,3 +1,4 @@
+from lapsum.topk import soft_topk
 import torch
 from torch.utils.data.dataloader import DataLoader
 from dataclasses import dataclass
@@ -73,5 +74,10 @@ def build_posthoc_M(
     tau = empirical_k.mean() / dict_size
 
     empirical_k = (empirical_A * (empirical_A > tau)).sum(dim=1) / empirical_A.sum()
+    # empirical_k = empirical_k / empirical_A.sum()
+
+    # empirical_A = soft_topk(
+    #     empirical_A, (empirical_k * dict_size * rho).unsqueeze(1), 0.001, dim=1
+    # )
 
     return empirical_A, empirical_k * dict_size * rho

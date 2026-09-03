@@ -5,159 +5,18 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from lapsum.topk import soft_topk
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.posthoc_M import (
-    compute_empirical_feature_class_map,
-)
-
-
-@torch.inference_mode()
-def compute_empirical_matrix(
-    activations_path: str,
-    model,
-    num_classes: int,
-    batch_size: int,
-    num_workers: int,
-    device: torch.device,
-    max_examples: int | None = None,
-):
-    """
-    Compute the empirical feature-class selection matrix
-
-        A[i, c] = P(feature i is selected | class = c)
-
-    using the same helper as the CA honesty evaluation.
-    """
-
-    dataset = ActivationsDataset(activations_path)
-
-    if max_examples is not None:
-        max_examples = min(max_examples, len(dataset))
-        dataset = torch.utils.data.Subset(
-            dataset,
-            range(max_examples),
-        )
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=device.type == "cuda",
-    )
-
-    empirical_A, _, total_examples = compute_empirical_feature_class_map(
-        model=model,
-        loader=loader,
-        num_classes=num_classes,
-        device=device,
-    )
-
-    return empirical_A.to(torch.float64), total_examples
-
-
-def build_posthoc_matrix(
-    train_A: torch.Tensor,
-    rho: float,
-    budget_mode: str,
-):
-    """
-    Construct a post-hoc feature-class annotation from the empirical
-    training matrix.
-
-    uniform:
-        Every feature gets k_i = round(rho) class associations.
-
-    estimated:
-        Allocate exactly Ktot = round(rho * d) associations to the
-        largest entries of train_A globally.
-
-    Returns:
-        posthoc_M: [d, C]
-            Binary feature-class association matrix.
-
-        k: [d]
-            Number of class associations assigned to each feature.
-    """
-
-    d, c = train_A.shape
-
-    Ktot = int(round(rho * d))
-    Ktot = min(Ktot, d * c)
-
-    if Ktot < 1:
-        raise ValueError(
-            f"rho={rho} gives total association budget K={Ktot}. "
-            "rho must be positive."
-        )
-
-    if budget_mode == "uniform":
-        k_int = int(round(rho))
-
-        if k_int < 1:
-            raise ValueError(f"Uniform budget must be at least 1, got rho={rho}.")
-
-        if k_int > c:
-            raise ValueError(
-                f"Uniform budget k={k_int} exceeds number of classes C={c}."
-            )
-
-        k = torch.full(
-            (d,),
-            float(k_int),
-            dtype=torch.float64,
-            device=train_A.device,
-        )
-
-        posthoc_M = torch.zeros_like(train_A)
-
-        for i in range(d):
-            top_classes = torch.topk(
-                train_A[i],
-                k=k_int,
-                dim=0,
-            ).indices
-
-            posthoc_M[i, top_classes] = 1.0
-
-        return posthoc_M, k
-
-    elif budget_mode == "estimated":
-        # Give exactly Ktot associations to the largest empirical
-        # feature-class associations in the training data.
-        flat_A = train_A.flatten()
-
-        _, top_indices = torch.topk(
-            flat_A,
-            k=Ktot,
-            dim=0,
-        )
-
-        hard_M = torch.zeros_like(train_A)
-
-        hard_M.flatten()[top_indices] = 1.0
-
-        k = hard_M.sum(dim=1)
-
-        posthoc_M = soft_topk(train_A, k.unsqueeze(1), 0.001)
-
-        return posthoc_M, k
-
-    else:
-        raise ValueError(
-            f"Unknown budget_mode={budget_mode!r}. "
-            "Expected 'uniform' or 'estimated'."
-        )
+from ca_sae.eval.posthoc_M import build_posthoc_M
+from ca_sae.sae.ca_sae import ClassAlignedSAE
 
 
 @torch.inference_mode()
 def evaluate_classifier(
     model,
     activations_path: str,
-    posthoc_M: torch.Tensor,
+    M: torch.Tensor,
     batch_size: int,
     num_workers: int,
     device: torch.device,
@@ -276,7 +135,7 @@ def evaluate_classifier(
         # scores[b, c] = sum_i pi[b, i] * M[i, c]
         # ----------------------------------------------------------
 
-        scores = pi @ posthoc_M.to(torch.float32)
+        scores = pi @ M.to(torch.float32)
 
         predictions = scores.argmax(dim=1)
 
@@ -442,20 +301,18 @@ def evaluate_classifier(
     }
 
 
+@torch.inference_mode()
 def main(
     architecture: str,
     checkpoint_path: str,
     test_activations_path: str,
-    train_activations_path: str | None,
-    precomputed_train_matrix: str | None,
+    precomputed_train_matrix: str | None = None,
     output_path: str | None = None,
     rho: float = 5.0,
     num_classes: int = 1000,
-    budget_mode: str = "uniform",
     batch_size: int = 4096,
     num_workers: int = 4,
     device: str | None = None,
-    max_train_examples: int | None = None,
     max_test_examples: int | None = None,
 ):
     """
@@ -506,37 +363,23 @@ def main(
 
     print("\nComputing empirical feature-class matrix " "on training data...")
 
-    if train_activations_path is not None:
-        print("\nComputing empirical feature-class matrix on training data...")
-        train_A, total_train_examples = compute_empirical_matrix(
-            activations_path=train_activations_path,
-            model=model,
-            num_classes=num_classes,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            device=device,
-            max_examples=max_train_examples,
-        )
+    if isinstance(model, ClassAlignedSAE) and precomputed_train_matrix is None:
+        print("Using built in M matrix")
+        train_A = model.class_matrix
+        M = model.calculate_M()
+        k = torch.softmax(model.budget_vector, dim=0) * model.features_per_class * d
     else:
         print(
             f"Loading precomputed empirical feature-class matrix from: {precomputed_train_matrix}"
         )
         train_A = torch.load(precomputed_train_matrix).to(device)
-        total_train_examples = -1
 
-    # ------------------------------------------------------------------
-    # Construct post-hoc matrix
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Construct post-hoc matrix
+        # ------------------------------------------------------------------
 
-    print("Constructing post-hoc feature-class matrix...")
-
-    posthoc_M, k = build_posthoc_matrix(
-        train_A=train_A,
-        rho=rho,
-        budget_mode=budget_mode,
-    )
-
-    Ktot = int(k.sum().item())
+        print("Constructing post-hoc feature-class matrix...")
+        M, k = build_posthoc_M(train_A, rho=rho)
 
     # ------------------------------------------------------------------
     # Evaluate on TEST data
@@ -547,7 +390,7 @@ def main(
     eval_results = evaluate_classifier(
         model=model,
         activations_path=test_activations_path,
-        posthoc_M=posthoc_M,
+        M=M,
         batch_size=batch_size,
         num_workers=num_workers,
         device=device,
@@ -572,7 +415,7 @@ def main(
     # ------------------------------------------------------------------
 
     train_cpu = train_A.cpu()
-    M_cpu = posthoc_M.cpu()
+    M_cpu = M.cpu()
     k_cpu = k.cpu()
 
     per_feature = []
@@ -612,13 +455,11 @@ def main(
 
     results = {
         "architecture": architecture,
-        "budget_mode": budget_mode,
         "rho": rho,
-        "num_train_examples": total_train_examples,
         "num_test_examples": eval_results["num_examples"],
         "num_features": d,
         "num_classes": c,
-        "total_association_budget": Ktot,
+        "total_association_budget": d * rho,
         "mean_feature_budget": float(k.mean()),
         "min_feature_budget": float(k.min()),
         "max_feature_budget": float(k.max()),
@@ -669,13 +510,11 @@ def main(
     print("\n=== Ad-hoc Matrix Free Classifier Evaluation ===")
 
     print(f"Architecture:              {architecture}")
-    print(f"Budget mode:               {budget_mode}")
     print(f"rho:                       {rho}")
-    print(f"Train examples:            " f"{total_train_examples:,}")
     print(f"Test examples:             " f"{eval_results['num_examples']:,}")
     print(f"Features:                  {d:,}")
     print(f"Classes:                   {c:,}")
-    print(f"Total association K:       {Ktot:,}")
+    print(f"Total association K:       {d * rho:,}")
 
     print()
     print(f"Mean feature budget:       " f"{k.mean().item():.3f}")
@@ -778,16 +617,7 @@ def cli():
         help="Path to the trained SAE checkpoint.",
     )
 
-    matrix_args = parser.add_mutually_exclusive_group(required=True)
-
-    matrix_args.add_argument(
-        "--train-activations-path",
-        type=str,
-        default=None,
-        help="Path to the training ActivationsDataset directory.",
-    )
-
-    matrix_args.add_argument(
+    parser.add_argument(
         "--precomputed-matrix",
         type=str,
         default=None,
@@ -812,24 +642,6 @@ def cli():
         type=float,
         default=5.0,
         help=("Average number of class associations " "per feature. Defaults to 5."),
-    )
-
-    parser.add_argument(
-        "--budget-mode",
-        type=str,
-        choices=[
-            "uniform",
-            "estimated",
-        ],
-        default="uniform",
-        help=(
-            "How to construct the post-hoc matrix. "
-            "'uniform' gives every feature round(rho) "
-            "class associations. "
-            "'estimated' allocates exactly rho*d "
-            "associations to the largest entries of "
-            "the empirical training matrix."
-        ),
     )
 
     parser.add_argument(
@@ -859,15 +671,6 @@ def cli():
     )
 
     parser.add_argument(
-        "--max-train-examples",
-        type=int,
-        default=None,
-        help=(
-            "Optionally use only the first N " "training examples when constructing M."
-        ),
-    )
-
-    parser.add_argument(
         "--max-test-examples",
         type=int,
         default=None,
@@ -879,17 +682,14 @@ def cli():
     main(
         architecture=args.architecture,
         checkpoint_path=args.checkpoint_path,
-        train_activations_path=args.train_activations_path,
         precomputed_train_matrix=args.precomputed_matrix,
         test_activations_path=args.test_activations_path,
         output_path=args.output_path,
         rho=args.rho,
         num_classes=args.num_classes,
-        budget_mode=args.budget_mode,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         device=args.device,
-        max_train_examples=(args.max_train_examples),
         max_test_examples=(args.max_test_examples),
     )
 

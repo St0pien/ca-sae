@@ -1,42 +1,60 @@
 """
-Concept-erasure / unlearning evaluation for SoftSAE-CA.
+Class-editing evaluation for SoftSAE-CA: structural alignment, specialist
+vs. generalist ablation, and cross-class steering.
 
-Pipeline for a target class c:
+Three independent checks, each cheaper/more informative than the last:
 
-    CLIP image embedding x
-      -> SAE encode         -> z            (already top-k-gated: zeros
-                                              on non-selected coords)
-      -> ablate/soften z_i for i in F_c = {i : M[i, c] > 0}
-      -> SAE decode         -> x_hat
-      -> zero-shot CLIP classification of x_hat against class text
-         embeddings (a CLIP-external measuring stick, never touched by
-         the SAE)
+  1. Structural alignment check (no forward passes, no classifier).
+     Read F_c = {i : M[i, c] > 0} straight off the trained matrix M and
+     ask: do sibling classes (small WordNet distance) share more claimed
+     features than distant classes do? This is computed once from M and
+     the WordNet distance matrix alone, so it's worth running BEFORE
+     investing in the sweeps below -- if the correlation is weak here,
+     the causal experiments downstream are unlikely to look good either.
 
-No forget-set gradients are used anywhere: F_c is read directly off the
-feature-class matrix M (or a post-hoc estimate of it, built exactly as
-in the free-classifier eval script), and the per-target-class step is
-just indexing a column of M. That "editing is a lookup, not an
-optimization" property is the whole point of the experiment, so nothing
-downstream should require labeled forget-set gradients either.
+  2. Specialist vs. generalist ablation grid. For each target class c,
+     split F_c into "specialist" (low per-feature budget k_i) and
+     "generalist" (high k_i) subsets using global quantiles of k, then
+     hard-ablate each subset (plus the full F_c, plus a size-matched
+     random control) and report forget accuracy on c together with
+     retain accuracy broken out by WordNet-distance tier to c
+     (sibling / close / distant / unrelated). The prediction under test:
+     specialist ablation -> large forget effect, ~no collateral outside
+     class c; generalist ablation -> collateral that fades with
+     WordNet distance; random ablation -> small effect on everything.
 
-Assumptions about the model API (matching the free-classifier script):
+  3. Cross-class steering. Instead of just erasing c, edit a class-c
+     sample's code toward a *different* class c': remove the evidence
+     for c that the sample actually used (its own selected coords
+     intersected with F_c), then inject F_c' at a magnitude matched to
+     the class-conditional mean activation of those features on real
+     c' samples, scaled by a dose parameter alpha. Reports steering
+     success rate (does zero-shot prediction flip to c'?), a manifold-
+     validity check against a random-vector-of-matched-norm control
+     (so "steered" isn't confounded with "broken"), a dose-response
+     sweep, and success rate as a function of WordNet distance between
+     c and c' -- with specialist-only vs. specialist+generalist
+     injection run separately, since the prediction is that reaching a
+     sibling class needs only the specialist delta while reaching a
+     distant class needs the shared/generalist features too.
+
+Model API assumptions (matching the codebase's existing eval scripts):
   - `model.encode(x)`  returns the sparse code z, [B, d], already
     top-k-gated (non-selected coords are exactly 0).
   - `model.decode(z)`  maps a code back to embedding space, [B, d] -> [B, n].
   - `model.dict_size`  is d.
+  - `ClassAlignedSAE.calculate_M()` / `.budget_vector` expose the
+    trained feature-class table directly; non-CA architectures fall
+    back to a precomputed empirical matrix via `build_posthoc_M`.
 
-Top-1 AND top-5 accuracy are tracked throughout (raw CLIP baseline, SAE
-round-trip baseline, and every sweep point's forget/retain accuracy).
-This matters specifically because fine-grained classes (e.g. dog
-breeds) can have very weak top-1 zero-shot CLIP accuracy while still
-being "roughly known" in the top-5 sense -- top-5 gives a less noisy
-signal for exactly the classes where the erasure story is most
-interesting, and lets you sanity-check whether a low top-1 baseline is
-"CLIP has no idea" vs "CLIP is confusing within a small cluster".
+No forget-set gradients are used anywhere. F_c / F_c' are lookups into
+M, and steering-target magnitudes come from a single pass computing
+class-conditional mean activations -- both are cheap, non-optimization
+operations, consistent with the rest of this codebase's eval scripts.
 """
 
 import argparse
-import importlib.util
+import itertools
 import json
 import random
 from collections import OrderedDict
@@ -47,13 +65,12 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ca_sae.cmd.empirical_m_classifier import (
-    build_posthoc_matrix,
-    compute_empirical_matrix,
-)
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
+from ca_sae.eval.posthoc_M import build_posthoc_M
 from ca_sae.labels import IMAGENET2012_CLASSES
+from ca_sae.sae.ca_sae import ClassAlignedSAE
+from ca_sae.sae.core import topk_per_row
 
 try:
     from nltk.corpus import wordnet as wn
@@ -75,7 +92,6 @@ def load_imagenet_classes(imagenet_labels_dict: OrderedDict):
     synonyms = [
         [s.strip() for s in label.split(",")] for label in imagenet_labels_dict.values()
     ]
-
     return wnids, synonyms
 
 
@@ -84,14 +100,9 @@ def wnid_to_synset(wnid: str):
 
 
 def build_wordnet_distance_matrix(wnids, cache_path: str | None = None):
-    """
-    dist[i, j] = shortest-path distance (# edges) between class i and j's
-    synsets in the WordNet noun hypernym/hyponym graph. dist[i, i] = 0.
-
-    O(C^2) synset-pair BFS calls, so this is cached to disk keyed only
-    on the class list -- it never depends on the SAE checkpoint, so you
-    should only ever pay this cost once.
-    """
+    """dist[i, j] = shortest-path distance (# edges) between class i and
+    j's synsets. dist[i, i] = 0. Cached to disk since it never depends
+    on the SAE checkpoint."""
     if cache_path is not None and Path(cache_path).exists():
         return np.load(cache_path)
 
@@ -103,8 +114,6 @@ def build_wordnet_distance_matrix(wnids, cache_path: str | None = None):
         for j in range(i + 1, c):
             d = synsets[i].shortest_path_distance(synsets[j])
             if d is None:
-                # Shouldn't happen for ImageNet nouns (all under
-                # entity.n.01), but don't crash the run over it.
                 d = 999
             dist[i, j] = d
             dist[j, i] = d
@@ -117,11 +126,8 @@ def build_wordnet_distance_matrix(wnids, cache_path: str | None = None):
 
 
 def distance_to_bin(distance: int, bin_edges: list[int]) -> str:
-    """
-    bin_edges=[2,4,6] -> "sibling" (d<=2), "close" (2<d<=4),
-    "distant" (4<d<=6), "unrelated" (d>6). distance==0 (the class
-    itself) should be excluded upstream, not binned here.
-    """
+    """bin_edges=[2,4,6] -> "sibling" (d<=2), "close" (2<d<=4),
+    "distant" (4<d<=6), "unrelated" (d>6)."""
     default_names = ["sibling", "close", "distant", "unrelated"]
     names = (
         default_names
@@ -135,32 +141,45 @@ def distance_to_bin(distance: int, bin_edges: list[int]) -> str:
 
 
 def classes_under_hypernym(wnids, hypernym_wnid: str) -> list[int]:
-    """
-    Convenience for picking a "hard regime" cluster automatically, e.g.
-    all dog breeds under n02084071 (dog, domestic dog, Canis familiaris).
-    Returns class indices (positions in `wnids`) whose synset has the
-    given hypernym as an ancestor.
-    """
+    """Class indices whose synset has `hypernym_wnid` as an ancestor."""
     target = wnid_to_synset(hypernym_wnid)
     out = []
     for idx, w in enumerate(wnids):
         syn = wnid_to_synset(w)
-        hypernym_paths = syn.hypernym_paths()
-        if any(target in path for path in hypernym_paths):
+        if any(target in path for path in syn.hypernym_paths()):
             out.append(idx)
     return out
+
+
+# ======================================================================
+# Rank correlation (no scipy dependency)
+# ======================================================================
+
+
+def _rankdata(a: np.ndarray) -> np.ndarray:
+    """Average-rank ranking, ties get the mean of their tied ranks."""
+    a = np.asarray(a, dtype=np.float64)
+    unique_vals, inverse, counts = np.unique(a, return_inverse=True, return_counts=True)
+    cum = np.cumsum(counts)
+    start = cum - counts
+    avg_rank = (start + cum - 1) / 2.0
+    return avg_rank[inverse]
+
+
+def spearman_corr(a: np.ndarray, b: np.ndarray) -> float:
+    ra, rb = _rankdata(a), _rankdata(b)
+    ra = ra - ra.mean()
+    rb = rb - rb.mean()
+    denom = np.sqrt((ra**2).sum() * (rb**2).sum())
+    if denom < 1e-12:
+        return float("nan")
+    return float((ra * rb).sum() / denom)
 
 
 # ======================================================================
 # Zero-shot CLIP classifier weights (external measuring stick)
 # ======================================================================
 
-# Reproduced from memory of the widely-shared CLIP "Prompt Engineering
-# for ImageNet" notebook template ensemble. I can't fetch the original
-# list to verify it here -- spot-check a handful of entries against the
-# official openai/CLIP repo before trusting absolute accuracy numbers
-# built on top of it. It should not affect *relative* comparisons
-# between architectures/editing strategies, only absolute scale.
 IMAGENET_ZEROSHOT_TEMPLATES = [
     "a bad photo of a {}.",
     "a photo of many {}.",
@@ -253,17 +272,8 @@ def build_zeroshot_weights(
     device: torch.device | str = "cuda",
     batch_size: int = 256,
 ) -> torch.Tensor:
-    """
-    Standard CLIP zero-shot classifier construction (Radford et al.
-    2021, Sec 3.1.4): for each class, average the (template x synonym)
-    text embeddings, then L2-normalize.
-
-    Uses the *official* CLIP repo (not open_clip), as requested:
-        pip install git+https://github.com/openai/CLIP.git
-
-    Returns:
-        weights: [C, D] float32, L2-normalized text embedding per class.
-    """
+    """Standard CLIP zero-shot classifier construction (Radford et al.
+    2021, Sec 3.1.4). Returns [C, D] L2-normalized text embeddings."""
     import clip
 
     templates = templates or IMAGENET_ZEROSHOT_TEMPLATES
@@ -273,14 +283,12 @@ def build_zeroshot_weights(
     weights = []
     for class_synonyms in tqdm(synonyms, desc="Building zero-shot weights"):
         prompts = [t.format(name) for name in class_synonyms for t in templates]
-
         embeds_chunks = []
         for i in range(0, len(prompts), batch_size):
             tokens = clip.tokenize(prompts[i : i + batch_size]).to(device)
             e = model.encode_text(tokens)
             e = e / e.norm(dim=-1, keepdim=True)
             embeds_chunks.append(e)
-
         class_embed = torch.cat(embeds_chunks, dim=0).mean(dim=0)
         class_embed = class_embed / class_embed.norm()
         weights.append(class_embed.float())
@@ -298,146 +306,13 @@ def zeroshot_classify(x: torch.Tensor, zeroshot_weights: torch.Tensor) -> torch.
 def topk_correctness(
     scores: torch.Tensor, labels: torch.Tensor, k: int
 ) -> torch.Tensor:
-    """
-    scores: [B, C], labels: [B]. Returns a bool tensor [B]: True where
-    the true label is among the top-k highest-scoring classes.
-    """
     k = min(k, scores.shape[1])
-    top_idx = scores.topk(k=k, dim=1).indices  # [B, k]
+    top_idx = scores.topk(k=k, dim=1).indices
     return (top_idx == labels.unsqueeze(1)).any(dim=1)
 
 
-@torch.inference_mode()
-def compute_raw_zeroshot_baseline(
-    x_all: torch.Tensor,
-    labels_all: torch.Tensor,
-    zeroshot_weights: torch.Tensor,
-    target_classes: list[int],
-    chunk_size: int,
-    device: torch.device,
-) -> dict[int, dict[str, float] | None]:
-    """
-    Zero-shot CLIP accuracy on the *untouched* embeddings -- no SAE
-    round-trip, no editing at all. This isolates "does CLIP reliably
-    recognize this class in the first place" from anything the SAE or
-    the editing procedure does. Computed once, since it doesn't depend
-    on any editing setting.
-
-    Returns {class_idx: {"top1": acc, "top5": acc}}, None for classes
-    with zero support in the loaded split.
-    """
-    correct_top1 = torch.empty(len(x_all), dtype=torch.bool)
-    correct_top5 = torch.empty(len(x_all), dtype=torch.bool)
-
-    for start in range(0, len(x_all), chunk_size):
-        end = start + chunk_size
-        x_batch = x_all[start:end].to(device)
-        labels_batch = labels_all[start:end].to(device)
-
-        scores = zeroshot_classify(x_batch, zeroshot_weights)
-        preds = scores.argmax(dim=1)
-
-        correct_top1[start:end] = (preds == labels_batch).cpu()
-        correct_top5[start:end] = topk_correctness(scores, labels_batch, k=5).cpu()
-
-    baseline = {}
-    for c in target_classes:
-        mask = labels_all == c
-        if mask.sum() == 0:
-            baseline[c] = None
-            continue
-        baseline[c] = {
-            "top1": correct_top1[mask].float().mean().item(),
-            "top5": correct_top5[mask].float().mean().item(),
-        }
-    return baseline
-
-
 # ======================================================================
-# Ablation strength: hard / graded / entropy-weighted (specialist vs
-# generalist aware)
-# ======================================================================
-
-
-def compute_row_entropy(M: torch.Tensor) -> torch.Tensor:
-    """
-    Normalized entropy of each feature's class-claim row M[i, :], read
-    as a distribution over classes.
-
-        entropy_i = 0   pure specialist, all mass on one class
-        entropy_i -> 1  budget spread broadly (generalist)
-
-    Normalized by log(k_i) (the max entropy achievable at that
-    feature's own budget) so entropy is comparable across features
-    with very different k_i, rather than penalizing high-k_i features
-    just for having more room to spread mass over.
-    """
-    eps = 1e-12
-    row_sum = M.sum(dim=1, keepdim=True).clamp_min(eps)
-    p = M / row_sum
-    h = -(p * (p + eps).log()).sum(dim=1)
-
-    k = M.sum(dim=1)
-    max_h = k.clamp_min(1.0 + eps).log()
-
-    normalized = torch.where(k > 1, h / max_h.clamp_min(eps), torch.zeros_like(h))
-    return normalized.clamp(0.0, 1.0)
-
-
-def compute_ablation_strength(
-    M: torch.Tensor,
-    row_entropy: torch.Tensor,
-    target_class: int,
-    mode: str,
-) -> torch.Tensor:
-    """
-    Per-feature ablation strength s_i in [0, 1] for erasing target_class.
-
-    "hard":                s_i = 1{M[i, c] > 0}
-    "graded_association":  s_i = M[i, c]
-    "entropy_weighted":    s_i = M[i, c] * (1 - row_entropy[i])
-        Down-weights generalist features relative to specialists that
-        claim the class equally strongly, since ablating a generalist
-        risks collateral damage on every other class it serves.
-    """
-    m_c = M[:, target_class]
-    if mode == "hard":
-        return (m_c > 0).float()
-    elif mode == "graded_association":
-        return m_c.clone()
-    elif mode == "entropy_weighted":
-        return m_c * (1.0 - row_entropy)
-    raise ValueError(f"Unknown ablation strength mode: {mode!r}")
-
-
-def build_feature_order(
-    candidate_features: torch.Tensor,
-    k: torch.Tensor,
-    order: str,
-    rng: random.Random,
-) -> list[int]:
-    """
-    Order in which F_c is progressively ablated as N sweeps 0 -> |F_c|.
-
-    "specialist_first": ascending by k_i. Cheap, class-specific
-        features go first; features shared across many classes are
-        left untouched longest.
-    "random": size-matched random permutation -- the control that
-        isolates whether picking the RIGHT features (not just removing
-        SOME features) is what drives the result.
-    """
-    idx = candidate_features.tolist()
-    if order == "specialist_first":
-        return sorted(idx, key=lambda i: k[i].item())
-    elif order == "random":
-        idx = idx.copy()
-        rng.shuffle(idx)
-        return idx
-    raise ValueError(f"Unknown order: {order!r}")
-
-
-# ======================================================================
-# Data loading (whole split into memory -- fine at ImageNet-val scale)
+# Data loading
 # ======================================================================
 
 
@@ -446,7 +321,6 @@ def load_all_activations(activations_path: str, batch_size: int, num_workers: in
     loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
     )
-
     xs, ys = [], []
     for x, y in tqdm(loader, desc="Loading activations"):
         xs.append(x)
@@ -455,190 +329,538 @@ def load_all_activations(activations_path: str, batch_size: int, num_workers: in
 
 
 # ======================================================================
-# Core sweep for a single target class / order / strength mode
+# Feature-class matrix M, per-feature budgets k
 # ======================================================================
 
 
+def load_feature_class_matrix(
+    model, precomputed_matrix: str | None, rho: float, device: torch.device
+):
+    if isinstance(model, ClassAlignedSAE) and precomputed_matrix is None:
+        print("Using built-in M matrix from ClassAlignedSAE model")
+        M = model.calculate_M()
+        k = (
+            torch.softmax(model.budget_vector, dim=0)
+            * model.features_per_class
+            * model.dict_size
+        )
+    else:
+        if precomputed_matrix is None:
+            raise ValueError(
+                "Model is not a ClassAlignedSAE, so --precomputed-matrix is required."
+            )
+        print(
+            f"Loading precomputed empirical feature-class matrix from: {precomputed_matrix}"
+        )
+        train_A = torch.load(precomputed_matrix).to(device)
+        print("Constructing post-hoc feature-class matrix M...")
+        M, k = build_posthoc_M(train_A, rho=rho)
+
+    M = topk_per_row(M, k)
+    return M.to(device, dtype=torch.float32), k.to(device, dtype=torch.float32)
+
+
+def compute_row_entropy(M: torch.Tensor) -> torch.Tensor:
+    """Normalized entropy of each feature's class-claim row, in [0, 1].
+    0 = pure specialist, 1 = budget spread maximally broadly."""
+    eps = 1e-12
+    row_sum = M.sum(dim=1, keepdim=True).clamp_min(eps)
+    p = M / row_sum
+    h = -(p * (p + eps).log()).sum(dim=1)
+    k = M.sum(dim=1)
+    max_h = k.clamp_min(1.0 + eps).log()
+    return torch.where(k > 1, h / max_h.clamp_min(eps), torch.zeros_like(h)).clamp(
+        0.0, 1.0
+    )
+
+
+# ======================================================================
+# Check 1: structural alignment -- does M's own geometry track WordNet?
+# ======================================================================
+
+
+def structural_alignment_check(
+    M: torch.Tensor, dist_matrix: np.ndarray, bin_edges: list[int]
+) -> dict:
+    """
+    Computes Jaccard(F_c, F_c') for every class pair directly from M --
+    no forward passes, no classifier, no editing. Vectorized: with
+    binary indicator B = (M > 0) of shape [d, C],
+
+        intersection = B.T @ B          [C, C]
+        size_c       = B.sum(0)         [C]
+        union        = size_c[:,None] + size_c[None,:] - intersection
+        jaccard      = intersection / union
+
+    Then correlates the upper-triangle of `jaccard` against the
+    corresponding WordNet distances (Spearman, since the relationship
+    is expected to be monotone, not linear), and reports mean jaccard
+    per WordNet distance bin as a more interpretable summary.
+
+    If the correlation here is weak or the wrong sign, the causal
+    ablation/steering experiments below are unlikely to show the
+    hierarchy-shaped collateral the method predicts -- worth checking
+    first, since this costs O(C^2) dense matmuls and nothing else.
+    """
+    B = (M > 0).float()
+    intersection = (B.T @ B).cpu().numpy()
+    size_c = B.sum(dim=0).cpu().numpy()
+    union = size_c[:, None] + size_c[None, :] - intersection
+    with np.errstate(divide="ignore", invalid="ignore"):
+        jaccard = np.where(union > 0, intersection / union, 0.0)
+
+    c = jaccard.shape[0]
+    iu = np.triu_indices(c, k=1)
+    jacc_pairs = jaccard[iu]
+    dist_pairs = dist_matrix[iu]
+
+    corr = spearman_corr(dist_pairs, jacc_pairs)
+
+    bin_names = [distance_to_bin(int(d), bin_edges) for d in dist_pairs]
+    bins = sorted(set(bin_names))
+    mean_jaccard_by_bin = {
+        b: float(jacc_pairs[np.array(bin_names) == b].mean()) for b in bins
+    }
+    count_by_bin = {b: int((np.array(bin_names) == b).sum()) for b in bins}
+
+    return {
+        "spearman_corr_distance_vs_jaccard": corr,
+        "mean_jaccard_by_wordnet_bin": mean_jaccard_by_bin,
+        "pair_count_by_wordnet_bin": count_by_bin,
+        "note": "expect a negative correlation: closer classes should share more claimed features",
+    }
+
+
+# ======================================================================
+# Check 2: specialist vs. generalist ablation, stratified by WordNet tier
+# ======================================================================
+
+
+def split_specialist_generalist(
+    k: torch.Tensor,
+    feature_indices: torch.Tensor,
+    spec_quantile: float,
+    gen_quantile: float,
+) -> tuple[list[int], list[int]]:
+    """Thresholds are computed over the *global* distribution of k (all
+    d features), not just F_c, so "specialist"/"generalist" mean the
+    same thing across every target class."""
+    lo = torch.quantile(k, spec_quantile).item()
+    hi = torch.quantile(k, gen_quantile).item()
+    idx = feature_indices.tolist()
+    specialists = [i for i in idx if k[i].item() <= lo]
+    generalists = [i for i in idx if k[i].item() >= hi]
+    return specialists, generalists
+
+
+def build_ablation_conditions(
+    f_c: torch.Tensor,
+    k: torch.Tensor,
+    dict_size: int,
+    rng: random.Random,
+    spec_quantile: float,
+    gen_quantile: float,
+) -> dict[str, list[int]]:
+    specialists, generalists = split_specialist_generalist(
+        k, f_c, spec_quantile, gen_quantile
+    )
+    full = f_c.tolist()
+
+    def size_matched_random(n: int, exclude: set[int]) -> list[int]:
+        pool = [i for i in range(dict_size) if i not in exclude]
+        return rng.sample(pool, min(n, len(pool)))
+
+    conditions = {"full": full}
+    if specialists:
+        conditions["specialists"] = specialists
+        conditions["random_matched_specialists"] = size_matched_random(
+            len(specialists), set(full)
+        )
+    if generalists:
+        conditions["generalists"] = generalists
+        conditions["random_matched_generalists"] = size_matched_random(
+            len(generalists), set(full)
+        )
+    conditions["random_matched_full"] = size_matched_random(len(full), set(full))
+    return conditions
+
+
 @torch.inference_mode()
-def run_sweep_for_setting(
+def ablate_and_evaluate(
     model,
     x_all: torch.Tensor,
     labels_all: torch.Tensor,
     zeroshot_weights: torch.Tensor,
     distance_row: np.ndarray,
     bin_edges: list[int],
-    strength_full: torch.Tensor,
-    feature_order: list[int],
+    feature_indices: list[int],
     target_class: int,
-    num_sweep_points: int,
     chunk_size: int,
     device: torch.device,
-):
-    """
-    Sweeps N = number of features from `feature_order` that are active,
-    from 0 to len(feature_order). At each N:
-      - builds the strength vector (zeros except the first N ordered
-        features, which get `strength_full`'s value at that index)
-      - edits every sample's code with that same strength vector
-        (editing is a global, sample-independent surgery -- matches how
-        you'd actually deploy an edited decoder)
-      - zero-shot classifies the reconstruction
-      - reports forget accuracy, retain accuracy overall + by WordNet
-        distance bin, and embedding fidelity on retained samples --
-        each as both top-1 and top-5
-
-    Returns a list of per-N result dicts.
-    """
+) -> dict:
+    """Single hard ablation of `feature_indices` (zeroed for every
+    sample, source class or not -- editing is a global, deployable
+    surgery, not a per-sample intervention). Reports forget accuracy on
+    `target_class`, retain accuracy overall, and retain accuracy broken
+    out by WordNet-distance tier to `target_class`."""
     d = model.dict_size
-    n_total = len(feature_order)
-    fractions = np.linspace(0.0, 1.0, num_sweep_points)
-    n_values = sorted(set(int(round(f * n_total)) for f in fractions))
+    mask = torch.zeros(d, device=device, dtype=torch.bool)
+    if feature_indices:
+        mask[torch.tensor(feature_indices, device=device)] = True
 
     target_mask = labels_all == target_class
     retain_mask = ~target_mask
-
-    # WordNet bin per sample, based on distance from target_class
-    # (excludes the target class itself, distance 0, by construction of
-    # retain_mask above).
     sample_distance = distance_row[labels_all.numpy()]
     sample_bin = np.array(
         [distance_to_bin(int(dd), bin_edges) for dd in sample_distance]
     )
 
-    results = []
+    correct_top1 = torch.empty(len(x_all), dtype=torch.bool)
+    correct_top5 = torch.empty(len(x_all), dtype=torch.bool)
+    cos_sims = torch.empty(len(x_all))
 
-    for n in n_values:
-        active = feature_order[:n]
-        strength_vec = torch.zeros(d, device=device)
-        if active:
-            active_idx = torch.tensor(active, device=device)
-            strength_vec[active_idx] = strength_full[active_idx]
+    for start in range(0, len(x_all), chunk_size):
+        end = start + chunk_size
+        x_batch = x_all[start:end].to(device)
+        labels_batch = labels_all[start:end].to(device)
 
-        preds = torch.empty(len(x_all), dtype=torch.long)
-        correct_top1 = torch.empty(len(x_all), dtype=torch.bool)
-        correct_top5 = torch.empty(len(x_all), dtype=torch.bool)
-        cos_sims = torch.empty(len(x_all))
+        z = model.encode(x_batch)
+        z_edited = z.masked_fill(mask.unsqueeze(0), 0.0)
+        x_hat = model.decode(z_edited)
 
-        for start in range(0, len(x_all), chunk_size):
-            end = start + chunk_size
-            x_batch = x_all[start:end].to(device)
-            labels_batch = labels_all[start:end].to(device)
+        scores = zeroshot_classify(x_hat, zeroshot_weights)
+        preds = scores.argmax(dim=1)
+        correct_top1[start:end] = (preds == labels_batch).cpu()
+        correct_top5[start:end] = topk_correctness(scores, labels_batch, k=5).cpu()
+        cos_sims[start:end] = torch.nn.functional.cosine_similarity(
+            x_hat, x_batch, dim=-1
+        ).cpu()
 
-            z = model.encode(x_batch)
-            z_edited = z * (1.0 - strength_vec.unsqueeze(0))
-            x_hat = model.decode(z_edited)
+    retain_by_bin, retain_by_bin_top5 = {}, {}
+    for bin_name in sorted(set(sample_bin[retain_mask.numpy()])):
+        bm = torch.from_numpy((sample_bin == bin_name) & retain_mask.numpy())
+        retain_by_bin[bin_name] = correct_top1[bm].float().mean().item()
+        retain_by_bin_top5[bin_name] = correct_top5[bm].float().mean().item()
 
-            scores = zeroshot_classify(x_hat, zeroshot_weights)
-            batch_preds = scores.argmax(dim=1)
-            preds[start:end] = batch_preds.cpu()
-            correct_top1[start:end] = (batch_preds == labels_batch).cpu()
-            correct_top5[start:end] = topk_correctness(scores, labels_batch, k=5).cpu()
+    return {
+        "num_features_ablated": len(feature_indices),
+        "forget_class_accuracy_top1": correct_top1[target_mask].float().mean().item(),
+        "forget_class_accuracy_top5": correct_top5[target_mask].float().mean().item(),
+        "retain_accuracy_overall_top1": correct_top1[retain_mask].float().mean().item(),
+        "retain_accuracy_overall_top5": correct_top5[retain_mask].float().mean().item(),
+        "retain_accuracy_by_wordnet_bin_top1": retain_by_bin,
+        "retain_accuracy_by_wordnet_bin_top5": retain_by_bin_top5,
+        "fidelity_cosine_mean_on_retain": cos_sims[retain_mask].mean().item(),
+    }
 
-            cos = torch.nn.functional.cosine_similarity(x_hat, x_batch, dim=-1)
-            cos_sims[start:end] = cos.cpu()
 
-        # ---- forget accuracy (top-1 and top-5) + confusion destination ----
-        # Confusion destination is inherently a top-1 notion (which
-        # single class did the sample get reassigned to), so it isn't
-        # duplicated for top-5.
-        target_preds = preds[target_mask]
-        forget_class_accuracy = correct_top1[target_mask].float().mean().item()
-        forget_class_accuracy_top5 = correct_top5[target_mask].float().mean().item()
-
-        misclassified = target_preds[target_preds != target_class]
-        if len(misclassified) > 0:
-            dest_counts = torch.bincount(
-                misclassified, minlength=zeroshot_weights.shape[0]
-            ).float()
-            dest_probs = dest_counts / dest_counts.sum()
-            nz = dest_probs[dest_probs > 0]
-            dest_entropy = (-(nz * nz.log()).sum()).item()
-            dest_entropy_norm = (
-                dest_entropy / max(np.log(len(nz)), 1e-12) if len(nz) > 1 else 0.0
+def run_specialist_generalist_grid(
+    model,
+    x_all: torch.Tensor,
+    labels_all: torch.Tensor,
+    zeroshot_weights: torch.Tensor,
+    dist_matrix: np.ndarray,
+    bin_edges: list[int],
+    M: torch.Tensor,
+    k: torch.Tensor,
+    target_classes: list[int],
+    spec_quantile: float,
+    gen_quantile: float,
+    rng: random.Random,
+    chunk_size: int,
+    device: torch.device,
+) -> dict:
+    """The 2x2(x3) grid from the design doc: for each target class,
+    {specialists, generalists, full, random-matched controls} crossed
+    with {forget effect, retain-by-WordNet-tier collateral}."""
+    grid = {}
+    for c in tqdm(target_classes, desc="Specialist/generalist grid"):
+        f_c = (M[:, c] > 0).nonzero(as_tuple=True)[0]
+        if len(f_c) == 0:
+            continue
+        conditions = build_ablation_conditions(
+            f_c, k, model.dict_size, rng, spec_quantile, gen_quantile
+        )
+        grid[c] = {}
+        for cond_name, feats in conditions.items():
+            grid[c][cond_name] = ablate_and_evaluate(
+                model,
+                x_all,
+                labels_all,
+                zeroshot_weights,
+                dist_matrix[c],
+                bin_edges,
+                feats,
+                c,
+                chunk_size,
+                device,
             )
-            top_dest_class = int(dest_counts.argmax().item())
-            top_dest_fraction = (dest_counts.max() / dest_counts.sum()).item()
-        else:
-            dest_entropy_norm, top_dest_class, top_dest_fraction = None, None, None
+    return grid
 
-        # ---- retain accuracy: overall + by WordNet bin (top-1 and top-5) ----
-        retain_accuracy_overall = correct_top1[retain_mask].float().mean().item()
-        retain_accuracy_overall_top5 = correct_top5[retain_mask].float().mean().item()
 
-        retain_by_bin = {}
-        retain_by_bin_top5 = {}
-        for bin_name in sorted(set(sample_bin[retain_mask.numpy()])):
-            bin_mask_np = (sample_bin == bin_name) & retain_mask.numpy()
-            bm = torch.from_numpy(bin_mask_np)
-            retain_by_bin[bin_name] = correct_top1[bm].float().mean().item()
-            retain_by_bin_top5[bin_name] = correct_top5[bm].float().mean().item()
+# ======================================================================
+# Check 3: cross-class steering
+# ======================================================================
 
-        # ---- fidelity on retained samples --------------------------
-        fidelity_cosine_mean = cos_sims[retain_mask].mean().item()
 
-        results.append(
-            {
-                "n_features": n,
-                "fraction_of_dict": n / d,
-                "fraction_of_Fc": n / max(n_total, 1),
-                "forget_class_accuracy": forget_class_accuracy,
-                "forget_class_accuracy_top5": forget_class_accuracy_top5,
-                "retain_accuracy_overall": retain_accuracy_overall,
-                "retain_accuracy_overall_top5": retain_accuracy_overall_top5,
-                "retain_accuracy_by_wordnet_bin": retain_by_bin,
-                "retain_accuracy_by_wordnet_bin_top5": retain_by_bin_top5,
-                "fidelity_cosine_mean": fidelity_cosine_mean,
-                "confusion_destination_entropy_norm": dest_entropy_norm,
-                "confusion_destination_top_class": top_dest_class,
-                "confusion_destination_top_fraction": top_dest_fraction,
-            }
+@torch.inference_mode()
+def compute_class_conditional_mean_activation(
+    model,
+    x_all: torch.Tensor,
+    labels_all: torch.Tensor,
+    num_classes: int,
+    chunk_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """mean_activation[c, i] = mean over samples of class c of z_i (raw
+    top-k-gated code, zeros included). This is the "typical activation
+    when this feature is doing its normal job for class c" magnitude
+    used to set injection strength during steering -- matching real
+    activity, not an arbitrary constant."""
+    d = model.dict_size
+    sums = torch.zeros(num_classes, d, device=device)
+    counts = torch.zeros(num_classes, device=device)
+
+    for start in range(0, len(x_all), chunk_size):
+        end = start + chunk_size
+        x_batch = x_all[start:end].to(device)
+        labels_batch = labels_all[start:end].to(device)
+        z = model.encode(x_batch)
+        sums.index_add_(0, labels_batch, z)
+        counts.index_add_(
+            0, labels_batch, torch.ones_like(labels_batch, dtype=torch.float)
         )
 
-    return results
+    return sums / counts.clamp_min(1.0).unsqueeze(1)
 
 
-def forget_retain_auc(sweep_results: list[dict], metric_suffix: str = "") -> float:
+@torch.inference_mode()
+def steer_batch(
+    model,
+    x_batch: torch.Tensor,
+    f_source_mask: torch.Tensor,
+    f_target_indices: torch.Tensor,
+    mean_activation_target_row: torch.Tensor,
+    alpha: float,
+) -> torch.Tensor:
+    """Remove the sample's own evidence for the source class (its
+    selected coords intersected with F_source), then set the target
+    class's claimed features to `alpha` times their typical magnitude
+    on real target-class samples. Returns the decoded, steered
+    embedding x_hat."""
+    z = model.encode(x_batch)
+    selected = z != 0
+    remove_mask = selected & f_source_mask.unsqueeze(0)
+    z_steered = z.masked_fill(remove_mask, 0.0)
+    if len(f_target_indices) > 0:
+        z_steered[:, f_target_indices] = (
+            alpha * mean_activation_target_row[f_target_indices]
+        )
+    return model.decode(z_steered)
+
+
+@torch.inference_mode()
+def random_vector_control_batch(
+    model,
+    x_batch: torch.Tensor,
+    f_source_mask: torch.Tensor,
+    injected_dim_count: int,
+    injected_norm_ref: torch.Tensor,
+    device: torch.device,
+    rng_generator: torch.Generator,
+) -> torch.Tensor:
+    """Null baseline for steering: remove the same source evidence, but
+    inject noise (random coords, matched in count and norm to the real
+    injection) instead of the real class-c' features. If this produces
+    a similar prediction-flip rate to the real steering, "success"
+    above is really just "breaking the embedding", not steering it."""
+    d = model.dict_size
+    z = model.encode(x_batch)
+    selected = z != 0
+    remove_mask = selected & f_source_mask.unsqueeze(0)
+    z_steered = z.masked_fill(remove_mask, 0.0)
+    if injected_dim_count > 0:
+        rand_idx = torch.randperm(d, generator=rng_generator, device="cpu")[
+            :injected_dim_count
+        ].to(device)
+        noise = torch.randn(
+            injected_dim_count, generator=rng_generator, device="cpu"
+        ).to(device)
+        noise = noise / noise.norm().clamp_min(1e-12) * injected_norm_ref
+        z_steered[:, rand_idx] = noise
+    return model.decode(z_steered)
+
+
+@torch.inference_mode()
+def evaluate_steering_pair(
+    model,
+    x_all: torch.Tensor,
+    labels_all: torch.Tensor,
+    zeroshot_weights: torch.Tensor,
+    M: torch.Tensor,
+    k: torch.Tensor,
+    mean_activation: torch.Tensor,
+    source_class: int,
+    target_class: int,
+    alphas: list[float],
+    spec_quantile: float,
+    gen_quantile: float,
+    samples_per_pair: int,
+    chunk_size: int,
+    device: torch.device,
+    seed: int,
+) -> dict:
+    """Steer up to `samples_per_pair` source-class samples toward
+    target_class, at each alpha, under two injection modes:
+      "specialists_only": inject only the low-k_i subset of F_target
+      "full":              inject all of F_target (specialists + generalists)
+    Prediction under test: "specialists_only" should already succeed
+    for nearby classes but fall off faster with WordNet distance than
+    "full" does.
     """
-    Area under the (forgetting achieved) vs retain_accuracy_overall
-    curve. "Forgetting achieved" is measured *relative to the SAE's own
-    N=0 round-trip baseline* (sweep_results[0], no ablation applied),
-    NOT as an absolute 1 - accuracy.
+    torch_gen = torch.Generator().manual_seed(seed)
 
-    metric_suffix="" uses top-1 fields (forget_class_accuracy,
-    retain_accuracy_overall); metric_suffix="_top5" uses the top-5
-    counterparts, so the exact same relative-to-baseline logic applies
-    to both without duplicating it.
+    idx = (labels_all == source_class).nonzero(as_tuple=True)[0]
+    if len(idx) > samples_per_pair:
+        perm = torch.randperm(len(idx), generator=torch_gen)[:samples_per_pair]
+        idx = idx[perm]
+    if len(idx) == 0:
+        return {"num_samples": 0}
 
-    Why relative: sweep_results[0] already reflects whatever accuracy
-    is lost to (a) CLIP's own zero-shot quality on this class and
-    (b) the SAE's reconstruction error, before any editing happens.
-    Measuring against absolute accuracy would credit the edit for
-    "forgetting" that the classifier already exhibited beforehand --
-    exactly the failure mode you'd hit on fine-grained classes CLIP
-    already struggles with (e.g. dog breeds at top-1). Clamped at 0
-    since accuracy occasionally ticks up slightly from baseline noise,
-    which isn't "forgetting".
+    f_source = (M[:, source_class] > 0).nonzero(as_tuple=True)[0]
+    f_source_mask = torch.zeros(model.dict_size, device=device, dtype=torch.bool)
+    f_source_mask[f_source.to(device)] = True
 
-    Higher AUC = the edit achieves the intended forgetting while
-    keeping everything else intact; lower AUC = forgetting and
-    collateral damage move together, i.e. you can't have one without
-    the other.
-    """
-    forget_key = f"forget_class_accuracy{metric_suffix}"
-    retain_key = f"retain_accuracy_overall{metric_suffix}"
-
-    baseline_forget_accuracy = sweep_results[0][forget_key]
-
-    x = np.array(
-        [max(0.0, baseline_forget_accuracy - r[forget_key]) for r in sweep_results]
+    f_target = (M[:, target_class] > 0).nonzero(as_tuple=True)[0]
+    target_specialists, _ = split_specialist_generalist(
+        k, f_target, spec_quantile, gen_quantile
     )
-    y = np.array([r[retain_key] for r in sweep_results])
-    order = np.argsort(x)
+    injection_sets = {
+        "specialists_only": torch.tensor(
+            target_specialists, device=device, dtype=torch.long
+        ),
+        "full": f_target.to(device),
+    }
 
-    # np.trapz was renamed to np.trapezoid in NumPy 2.0 and removed in
-    # later 2.x releases; support both without pinning a NumPy version.
-    trapezoid_fn = getattr(np, "trapezoid", None) or np.trapz
-    return float(trapezoid_fn(y[order], x[order]))
+    mean_row = mean_activation[target_class].to(device)
+    x_src = x_all[idx].to(device)
+    real_norm_ref = x_src.norm(dim=-1).mean()
+
+    result: dict = {"num_samples": len(idx), "by_mode": {}}
+
+    for mode_name, target_idx in injection_sets.items():
+        if len(target_idx) == 0:
+            continue
+        mode_result = {"dose_response": []}
+        for alpha in alphas:
+            x_hat_chunks, control_chunks = [], []
+            for start in range(0, len(x_src), chunk_size):
+                x_batch = x_src[start : start + chunk_size]
+                x_hat_chunks.append(
+                    steer_batch(
+                        model, x_batch, f_source_mask, target_idx, mean_row, alpha
+                    )
+                )
+                injected_norm_ref = (alpha * mean_row[target_idx]).norm()
+                control_chunks.append(
+                    random_vector_control_batch(
+                        model,
+                        x_batch,
+                        f_source_mask,
+                        len(target_idx),
+                        injected_norm_ref,
+                        device,
+                        torch_gen,
+                    )
+                )
+            x_hat = torch.cat(x_hat_chunks, dim=0)
+            x_control = torch.cat(control_chunks, dim=0)
+
+            scores = zeroshot_classify(x_hat, zeroshot_weights)
+            preds = scores.argmax(dim=1)
+            success_rate = (preds == target_class).float().mean().item()
+            target_cos = scores[:, target_class].mean().item()
+
+            control_scores = zeroshot_classify(x_control, zeroshot_weights)
+            control_preds = control_scores.argmax(dim=1)
+            control_success_rate = (control_preds == target_class).float().mean().item()
+
+            mode_result["dose_response"].append(
+                {
+                    "alpha": alpha,
+                    "steering_success_rate": success_rate,
+                    "random_control_success_rate": control_success_rate,
+                    "mean_cosine_to_target_text": target_cos,
+                    "mean_embedding_norm": x_hat.norm(dim=-1).mean().item(),
+                    "real_embedding_norm_ref": real_norm_ref.item(),
+                }
+            )
+        result["by_mode"][mode_name] = mode_result
+
+    return result
+
+
+def evaluate_steering_grid(
+    model,
+    x_all: torch.Tensor,
+    labels_all: torch.Tensor,
+    zeroshot_weights: torch.Tensor,
+    M: torch.Tensor,
+    k: torch.Tensor,
+    mean_activation: torch.Tensor,
+    dist_matrix: np.ndarray,
+    bin_edges: list[int],
+    class_pairs: list[tuple[int, int]],
+    alphas: list[float],
+    spec_quantile: float,
+    gen_quantile: float,
+    samples_per_pair: int,
+    chunk_size: int,
+    device: torch.device,
+    seed: int,
+) -> dict:
+    per_pair = {}
+    for c_src, c_tgt in tqdm(class_pairs, desc="Steering pairs"):
+        per_pair[(c_src, c_tgt)] = evaluate_steering_pair(
+            model,
+            x_all,
+            labels_all,
+            zeroshot_weights,
+            M,
+            k,
+            mean_activation,
+            c_src,
+            c_tgt,
+            alphas,
+            spec_quantile,
+            gen_quantile,
+            samples_per_pair,
+            chunk_size,
+            device,
+            seed,
+        )
+
+    # Aggregate success rate (at the largest alpha, "full" mode) by
+    # WordNet distance bin between source and target.
+    by_bin: dict[str, list[float]] = {}
+    for (c_src, c_tgt), res in per_pair.items():
+        if "full" not in res.get("by_mode", {}):
+            continue
+        dose = res["by_mode"]["full"]["dose_response"]
+        if not dose:
+            continue
+        last = dose[-1]
+        bin_name = distance_to_bin(int(dist_matrix[c_src, c_tgt]), bin_edges)
+        by_bin.setdefault(bin_name, []).append(last["steering_success_rate"])
+
+    success_rate_by_wordnet_bin = {b: float(np.mean(v)) for b, v in by_bin.items()}
+
+    return {
+        "per_pair": {
+            f"{c_src}->{c_tgt}": res for (c_src, c_tgt), res in per_pair.items()
+        },
+        "steering_success_rate_by_wordnet_bin_full_mode": success_rate_by_wordnet_bin,
+    }
 
 
 # ======================================================================
@@ -650,20 +872,22 @@ def main(
     architecture: str,
     checkpoint_path: str,
     test_activations_path: str,
-    train_activations_path: str | None,
-    precomputed_train_matrix: str | None,
+    precomputed_matrix: str | None,
     zeroshot_weights_path: str,
     wordnet_distance_cache: str | None,
     target_classes: list[int] | None,
     hypernym_cluster: str | None,
-    num_random_control_classes: int,
-    min_baseline_accuracy: float,
+    num_random_target_classes: int,
     rho: float,
-    budget_mode: str,
-    orders: list[str],
-    strength_modes: list[str],
-    num_sweep_points: int,
+    spec_quantile: float,
+    gen_quantile: float,
     distance_bin_edges: list[int],
+    run_structural_check: bool,
+    run_ablation_grid: bool,
+    run_steering: bool,
+    num_steering_pairs: int,
+    steering_samples_per_pair: int,
+    steering_alphas: list[float],
     clip_model_name: str,
     batch_size: int,
     num_workers: int,
@@ -671,7 +895,6 @@ def main(
     seed: int,
     output_path: str | None,
     device: str | None,
-    max_train_examples: int | None,
     max_test_examples: int | None,
     imagenet_ordered_dict: OrderedDict = IMAGENET2012_CLASSES,
 ):
@@ -680,39 +903,13 @@ def main(
     device = torch.device(device)
     rng = random.Random(seed)
 
-    # ------------------------------------------------------------
-    # Model + feature-class matrix M (reused verbatim from the
-    # free-classifier eval script)
-    # ------------------------------------------------------------
     model = SUPPORTED_ARCHITECTURES[architecture].from_pretrained(
         checkpoint_path, device=device
     )
     model.eval()
-    d = model.dict_size
 
-    print("Computing empirical feature-class matrix on training data...")
-    if train_activations_path is not None:
-        train_A, _ = compute_empirical_matrix(
-            activations_path=train_activations_path,
-            model=model,
-            num_classes=1000,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            device=device,
-            max_examples=max_train_examples,
-        )
-    else:
-        train_A = torch.load(precomputed_train_matrix).to(device)
+    M, k = load_feature_class_matrix(model, precomputed_matrix, rho, device)
 
-    print("Constructing post-hoc feature-class matrix M...")
-    M, k = build_posthoc_matrix(train_A=train_A, rho=rho, budget_mode=budget_mode)
-    M = train_A.to(device, dtype=torch.float32)
-    k = k.to(device, dtype=torch.float32)
-    row_entropy = compute_row_entropy(M)
-
-    # ------------------------------------------------------------
-    # Classes, synsets, WordNet distances, zero-shot weights
-    # ------------------------------------------------------------
     print("Loading ImageNet class / synset mapping...")
     wnids, synonyms = load_imagenet_classes(imagenet_ordered_dict)
     assert len(wnids) == 1000, f"Expected 1000 classes, got {len(wnids)}"
@@ -735,212 +932,118 @@ def main(
         Path(zeroshot_weights_path).parent.mkdir(parents=True, exist_ok=True)
         np.save(zeroshot_weights_path, zeroshot_weights.cpu().numpy())
 
-    # ------------------------------------------------------------
-    # Target class selection
-    # ------------------------------------------------------------
     if target_classes is not None:
-        targets = target_classes
+        targets = list(target_classes)
     elif hypernym_cluster is not None:
         print(f"Selecting target classes under hypernym {hypernym_cluster}...")
         targets = classes_under_hypernym(wnids, hypernym_cluster)
     else:
         targets = []
-
-    if num_random_control_classes > 0:
+    if num_random_target_classes > 0:
         pool = [i for i in range(1000) if i not in targets]
-        targets = targets + rng.sample(pool, min(num_random_control_classes, len(pool)))
+        targets = targets + rng.sample(pool, min(num_random_target_classes, len(pool)))
+    print(f"Target classes: {targets}")
 
-    print(f"Evaluating {len(targets)} target classes: {targets}")
-
-    # ------------------------------------------------------------
-    # Load test data once
-    # ------------------------------------------------------------
-    print("Loading test activations...")
-    x_all, labels_all = load_all_activations(
-        test_activations_path, batch_size, num_workers
-    )
-    if max_test_examples is not None:
-        x_all = x_all[:max_test_examples]
-        labels_all = labels_all[:max_test_examples]
-
-    # ------------------------------------------------------------
-    # Raw-CLIP-only baseline (no SAE at all), per target class, top-1
-    # and top-5. Flags classes where CLIP itself already can't
-    # reliably tell this class apart -- "forgetting" isn't a
-    # meaningful concept there, and including them would let
-    # pre-existing weakness masquerade as successful erasure. The
-    # reliability gate uses top-1 (the stricter bar); top-5 is carried
-    # along purely as a diagnostic to distinguish "CLIP has no idea"
-    # from "CLIP is confusing within a small, plausible cluster".
-    # ------------------------------------------------------------
-    print("Computing raw zero-shot CLIP baseline (no SAE) per target class...")
-    raw_baseline = compute_raw_zeroshot_baseline(
-        x_all, labels_all, zeroshot_weights, targets, chunk_size, device
-    )
-
-    unreliable = [
-        c
-        for c in targets
-        if raw_baseline.get(c) is not None
-        and raw_baseline[c]["top1"] < min_baseline_accuracy
-    ]
-    if unreliable:
-        print(
-            f"[warn] {len(unreliable)} target classes have raw zero-shot CLIP "
-            f"top-1 accuracy below {min_baseline_accuracy:.2f} before any editing -- "
-            f"these are flagged 'reliable': false below and excluded from the "
-            f"collateral-correlation summary, since 'forgetting' isn't well-defined "
-            f"when the classifier already couldn't recognize the class:"
-        )
-        for c in unreliable:
-            b = raw_baseline[c]
-            print(
-                f"    class {c} ({wnids[c]}): "
-                f"raw top1 = {b['top1']:.3f}, raw top5 = {b['top5']:.3f}"
-            )
-
-    # ------------------------------------------------------------
-    # Main sweep loop
-    # ------------------------------------------------------------
-    all_results = {}
-    collateral_predictors = (
-        []
-    )  # sum_{i in F_c} k_i, per target class (hard mode, full ablation)
-    collateral_observed = []  # 1 - retain_accuracy_overall at full ablation (hard mode)
-
-    for c in tqdm(targets, desc="Target classes"):
-        f_c = (M[:, c] > 0).nonzero(as_tuple=True)[0]
-        if len(f_c) == 0:
-            print(
-                f"[warn] class {c} ({wnids[c]}) has no claiming features under this M; skipping."
-            )
-            continue
-
-        c_baseline = raw_baseline.get(c)
-
-        all_results[c] = {
-            "wnid": wnids[c],
-            "num_claiming_features": len(f_c),
-            "raw_clip_baseline_accuracy_top1": (
-                c_baseline["top1"] if c_baseline else None
-            ),
-            "raw_clip_baseline_accuracy_top5": (
-                c_baseline["top5"] if c_baseline else None
-            ),
-            "reliable": c_baseline is not None
-            and c_baseline["top1"] >= min_baseline_accuracy,
-            # filled in below, from sweep[0]
-            "sae_roundtrip_baseline_forget_accuracy_top1": None,
-            "sae_roundtrip_baseline_forget_accuracy_top5": None,
-            "by_setting": {},
-        }
-
-        for order in orders:
-            feature_order = build_feature_order(f_c, k, order, rng)
-
-            for mode in strength_modes:
-                strength_full = compute_ablation_strength(M, row_entropy, c, mode)
-
-                sweep = run_sweep_for_setting(
-                    model=model,
-                    x_all=x_all,
-                    labels_all=labels_all,
-                    zeroshot_weights=zeroshot_weights,
-                    distance_row=dist_matrix[c],
-                    bin_edges=distance_bin_edges,
-                    strength_full=strength_full,
-                    feature_order=feature_order,
-                    target_class=c,
-                    num_sweep_points=num_sweep_points,
-                    chunk_size=chunk_size,
-                    device=device,
-                )
-
-                key = f"{order}__{mode}"
-                all_results[c]["by_setting"][key] = {
-                    "sweep": sweep,
-                    "forget_retain_auc": forget_retain_auc(sweep),
-                    "forget_retain_auc_top5": forget_retain_auc(
-                        sweep, metric_suffix="_top5"
-                    ),
-                }
-
-                # sweep[0] is always N=0 (no ablation): the SAE's own
-                # round-trip baseline, isolated from the raw-CLIP
-                # baseline above. Only needs recording once per class.
-                if (
-                    all_results[c]["sae_roundtrip_baseline_forget_accuracy_top1"]
-                    is None
-                ):
-                    all_results[c]["sae_roundtrip_baseline_forget_accuracy_top1"] = (
-                        sweep[0]["forget_class_accuracy"]
-                    )
-                    all_results[c]["sae_roundtrip_baseline_forget_accuracy_top5"] = (
-                        sweep[0]["forget_class_accuracy_top5"]
-                    )
-
-                if (
-                    order == "specialist_first"
-                    and mode == "hard"
-                    and all_results[c]["reliable"]
-                ):
-                    collateral_predictors.append(float(k[f_c].sum().item()))
-                    collateral_observed.append(
-                        1.0 - sweep[-1]["retain_accuracy_overall"]
-                    )
-
-    # ------------------------------------------------------------
-    # Predicted (sum k_i over F_c) vs. observed collateral correlation
-    # ------------------------------------------------------------
-    if len(collateral_predictors) >= 2:
-        corr = float(np.corrcoef(collateral_predictors, collateral_observed)[0, 1])
-    else:
-        corr = None
-
-    summary = {
+    summary: dict = {
         "architecture": architecture,
         "rho": rho,
-        "budget_mode": budget_mode,
-        "num_target_classes": len(all_results),
-        "orders": orders,
-        "strength_modes": strength_modes,
-        "num_sweep_points": num_sweep_points,
-        "distance_bin_edges": distance_bin_edges,
-        "predicted_vs_observed_collateral_correlation": corr,
-        "predicted_collateral_values": collateral_predictors,
-        "observed_collateral_values": collateral_observed,
-        "results_by_class": all_results,
+        "target_classes": targets,
     }
 
-    print("\n=== Unlearning / Concept-Erasure Evaluation Summary ===")
-    print(f"Target classes evaluated:              {len(all_results)}")
-    print(
-        f"  ...of which flagged unreliable:      {sum(1 for r in all_results.values() if not r['reliable'])}"
-        f" (raw CLIP top-1 baseline < {min_baseline_accuracy:.2f})"
-    )
-    print(
-        f"Predicted-vs-observed collateral corr:  {corr}  (reliable classes only, n={len(collateral_predictors)})"
-    )
-    for c, r in all_results.items():
-        flag = "" if r["reliable"] else "  [UNRELIABLE BASELINE]"
+    # -- Check 1: structural alignment (no forward passes needed) -----
+    if run_structural_check:
+        print("\n=== Structural alignment check (M vs. WordNet) ===")
+        structural = structural_alignment_check(M, dist_matrix, distance_bin_edges)
         print(
-            f"  class {c:4d} ({r['wnid']}) "
-            f"raw_clip_baseline(top1/top5)={r['raw_clip_baseline_accuracy_top1']:.3f}/"
-            f"{r['raw_clip_baseline_accuracy_top5']:.3f} "
-            f"sae_roundtrip_baseline(top1/top5)={r['sae_roundtrip_baseline_forget_accuracy_top1']:.3f}/"
-            f"{r['sae_roundtrip_baseline_forget_accuracy_top5']:.3f}{flag}"
+            f"Spearman corr(distance, jaccard): {structural['spearman_corr_distance_vs_jaccard']:.4f}"
         )
-        for key, v in r["by_setting"].items():
-            print(
-                f"      [{key:35s}] forget-retain AUC (top1/top5) = "
-                f"{v['forget_retain_auc']:.4f} / {v['forget_retain_auc_top5']:.4f}"
-            )
+        print(f"Mean jaccard by bin: {structural['mean_jaccard_by_wordnet_bin']}")
+        summary["structural_alignment"] = structural
+
+    # -- Data needed for checks 2 and 3 --------------------------------
+    if run_ablation_grid or run_steering:
+        print("\nLoading test activations...")
+        x_all, labels_all = load_all_activations(
+            test_activations_path, batch_size, num_workers
+        )
+        if max_test_examples is not None:
+            x_all = x_all[:max_test_examples]
+            labels_all = labels_all[:max_test_examples]
+
+    # -- Check 2: specialist vs. generalist ablation grid --------------
+    if run_ablation_grid:
+        print("\n=== Specialist vs. generalist ablation grid ===")
+        grid = run_specialist_generalist_grid(
+            model,
+            x_all,
+            labels_all,
+            zeroshot_weights,
+            dist_matrix,
+            distance_bin_edges,
+            M,
+            k,
+            targets,
+            spec_quantile,
+            gen_quantile,
+            rng,
+            chunk_size,
+            device,
+        )
+        for c, conditions in grid.items():
+            print(f"  class {c} ({wnids[c]}):")
+            for cond_name, r in conditions.items():
+                print(
+                    f"    [{cond_name:28s}] forget_top1={r['forget_class_accuracy_top1']:.3f} "
+                    f"retain_overall_top1={r['retain_accuracy_overall_top1']:.3f} "
+                    f"retain_by_bin_top1={r['retain_accuracy_by_wordnet_bin_top1']}"
+                )
+        summary["specialist_generalist_grid"] = {str(c): v for c, v in grid.items()}
+
+    # -- Check 3: cross-class steering ---------------------------------
+    if run_steering:
+        print("\n=== Cross-class steering ===")
+        num_classes = zeroshot_weights.shape[0]
+        mean_activation = compute_class_conditional_mean_activation(
+            model, x_all, labels_all, num_classes, chunk_size, device
+        )
+
+        if len(targets) >= 2:
+            all_pairs = list(itertools.permutations(targets, 2))
+        else:
+            all_pairs = list(itertools.permutations(range(1000), 2))
+        rng.shuffle(all_pairs)
+        class_pairs = all_pairs[:num_steering_pairs]
+
+        steering = evaluate_steering_grid(
+            model,
+            x_all,
+            labels_all,
+            zeroshot_weights,
+            M,
+            k,
+            mean_activation,
+            dist_matrix,
+            distance_bin_edges,
+            class_pairs,
+            steering_alphas,
+            spec_quantile,
+            gen_quantile,
+            steering_samples_per_pair,
+            chunk_size,
+            device,
+            seed,
+        )
+        print(
+            f"Steering success rate by WordNet bin (full mode, max alpha): "
+            f"{steering['steering_success_rate_by_wordnet_bin_full_mode']}"
+        )
+        summary["steering"] = steering
 
     if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
-            json.dump(summary, f, indent=2)
+            json.dump(summary, f, indent=2, default=str)
         print(f"\nSaved results to {output_path}")
 
     return summary
@@ -948,7 +1051,8 @@ def main(
 
 def cli():
     parser = argparse.ArgumentParser(
-        description="Unlearning/concept-erasure evaluation via SoftSAE-CA's feature-class matrix M."
+        description="SoftSAE-CA editing evaluation: structural alignment, specialist/generalist "
+        "ablation, and cross-class steering."
     )
 
     parser.add_argument(
@@ -959,26 +1063,12 @@ def cli():
     )
     parser.add_argument("--checkpoint-path", required=True)
     parser.add_argument("--test-activations-path", required=True)
-
-    matrix_args = parser.add_mutually_exclusive_group(required=True)
-    matrix_args.add_argument("--train-activations-path", default=None)
-    matrix_args.add_argument("--precomputed-matrix", default=None)
-
-    parser.add_argument(
-        "--zeroshot-weights-path",
-        required=True,
-        help="Path to load/save the precomputed [1000, D] zero-shot text embeddings.",
-    )
+    parser.add_argument("--precomputed-matrix", default=None)
+    parser.add_argument("--zeroshot-weights-path", required=True)
     parser.add_argument("--wordnet-distance-cache", default=None)
 
     target_args = parser.add_mutually_exclusive_group(required=False)
-    target_args.add_argument(
-        "--target-classes",
-        type=int,
-        nargs="+",
-        default=None,
-        help="Explicit class indices to erase.",
-    )
+    target_args.add_argument("--target-classes", type=int, nargs="+", default=None)
     target_args.add_argument(
         "--hypernym-cluster",
         type=str,
@@ -986,56 +1076,50 @@ def cli():
         help="wnid whose descendants form the target-class cluster, e.g. n02084071 (dog).",
     )
 
-    parser.add_argument(
-        "--num-random-control-classes",
-        type=int,
-        default=10,
-        help="Additional randomly chosen, unrelated classes to erase as an easy-regime control.",
-    )
-    parser.add_argument(
-        "--min-baseline-accuracy",
-        type=float,
-        default=0.2,
-        help="Target classes whose raw (no-SAE) top-1 zero-shot CLIP accuracy falls "
-        "below this are flagged 'reliable': false and excluded from the collateral-"
-        "correlation summary, since 'forgetting' isn't well-defined for a class "
-        "CLIP couldn't reliably recognize in the first place.",
-    )
-
+    parser.add_argument("--num-random-target-classes", type=int, default=10)
     parser.add_argument("--rho", type=float, default=5.0)
     parser.add_argument(
-        "--budget-mode", choices=["uniform", "estimated"], default="estimated"
-    )
-
-    parser.add_argument(
-        "--orders",
-        nargs="+",
-        default=["specialist_first", "random"],
-        choices=["specialist_first", "random"],
+        "--spec-quantile",
+        type=float,
+        default=0.25,
+        help="features with k_i at/below this global quantile are 'specialists'.",
     )
     parser.add_argument(
-        "--strength-modes",
-        nargs="+",
-        default=["hard", "graded_association", "entropy_weighted"],
-        choices=["hard", "graded_association", "entropy_weighted"],
+        "--gen-quantile",
+        type=float,
+        default=0.75,
+        help="features with k_i at/above this global quantile are 'generalists'.",
     )
-    parser.add_argument("--num-sweep-points", type=int, default=8)
     parser.add_argument("--distance-bin-edges", type=int, nargs="+", default=[2, 4, 6])
+
+    parser.add_argument("--run-structural-check", action="store_true", default=True)
+    parser.add_argument(
+        "--no-structural-check", dest="run_structural_check", action="store_false"
+    )
+    parser.add_argument("--run-ablation-grid", action="store_true", default=True)
+    parser.add_argument(
+        "--no-ablation-grid", dest="run_ablation_grid", action="store_false"
+    )
+    parser.add_argument("--run-steering", action="store_true", default=True)
+    parser.add_argument("--no-steering", dest="run_steering", action="store_false")
+
+    parser.add_argument("--num-steering-pairs", type=int, default=50)
+    parser.add_argument("--steering-samples-per-pair", type=int, default=64)
+    parser.add_argument(
+        "--steering-alphas",
+        type=float,
+        nargs="+",
+        default=[0.0, 0.25, 0.5, 1.0, 1.5, 2.0],
+    )
 
     parser.add_argument("--clip-model-name", default="ViT-B/32")
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=2048,
-        help="Batch size for the encode/edit/decode/classify inner loop.",
-    )
+    parser.add_argument("--chunk-size", type=int, default=2048)
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-path", default=None)
     parser.add_argument("--device", default=None)
-    parser.add_argument("--max-train-examples", type=int, default=None)
     parser.add_argument("--max-test-examples", type=int, default=None)
 
     args = parser.parse_args()
@@ -1044,20 +1128,22 @@ def cli():
         architecture=args.architecture,
         checkpoint_path=args.checkpoint_path,
         test_activations_path=args.test_activations_path,
-        train_activations_path=args.train_activations_path,
-        precomputed_train_matrix=args.precomputed_matrix,
+        precomputed_matrix=args.precomputed_matrix,
         zeroshot_weights_path=args.zeroshot_weights_path,
         wordnet_distance_cache=args.wordnet_distance_cache,
         target_classes=args.target_classes,
         hypernym_cluster=args.hypernym_cluster,
-        num_random_control_classes=args.num_random_control_classes,
-        min_baseline_accuracy=args.min_baseline_accuracy,
+        num_random_target_classes=args.num_random_target_classes,
         rho=args.rho,
-        budget_mode=args.budget_mode,
-        orders=args.orders,
-        strength_modes=args.strength_modes,
-        num_sweep_points=args.num_sweep_points,
+        spec_quantile=args.spec_quantile,
+        gen_quantile=args.gen_quantile,
         distance_bin_edges=args.distance_bin_edges,
+        run_structural_check=args.run_structural_check,
+        run_ablation_grid=args.run_ablation_grid,
+        run_steering=args.run_steering,
+        num_steering_pairs=args.num_steering_pairs,
+        steering_samples_per_pair=args.steering_samples_per_pair,
+        steering_alphas=args.steering_alphas,
         clip_model_name=args.clip_model_name,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -1065,7 +1151,6 @@ def cli():
         seed=args.seed,
         output_path=args.output_path,
         device=args.device,
-        max_train_examples=args.max_train_examples,
         max_test_examples=args.max_test_examples,
     )
 

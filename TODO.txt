@@ -1,0 +1,29 @@
+- Make probing on train set not a split
+
+
+=== Aggregate summary (graded PMI-weighted edit) ===
+Classes evaluated:                                100
+Mean edit strength applied (both conditions):     0.0010
+Mean effective features edited, graded / shuffled: 4.27 / 4.14
+Forget-drop per effective feature edited (graded): 0.0818
+Mean forget-acc drop, graded edit:                0.313 (std 0.218)
+Mean forget-acc drop, shuffled-info control:      0.005 (std 0.033)
+Mean paired difference (graded - shuffled):       0.308
+Fraction of classes where graded beats shuffled:  0.97
+Wilcoxon signed-rank (graded vs shuffled):         stat=44.500 p=0.0000
+Mean retain-accuracy collateral, graded / shuffled: -0.0034 / -0.0028
+Corr(baseline accuracy, graded drop):             r=0.082 p=0.4170
+
+
+=== Aggregate summary (graded PMI-weighted edit) ===
+Classes evaluated:                                100
+Mean edit strength applied (both conditions):     0.0012
+Mean effective features edited, graded / shuffled: 5.00 / 3.67
+Forget-drop per effective feature edited (graded): 0.0635
+Mean forget-acc drop, graded edit:                0.265 (std 0.154)
+Mean forget-acc drop, shuffled-info control:      0.003 (std 0.027)
+Mean paired difference (graded - shuffled):       0.263
+Fraction of classes where graded beats shuffled:  0.99
+Wilcoxon signed-rank (graded vs shuffled):         stat=0.000 p=0.0000
+Mean retain-accuracy collateral, graded / shuffled: -0.0046 / -0.0039
+Corr(baseline accuracy, graded drop):             r=-0.021 p=0.8340

@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.posthoc_M import compute_empirical_feature_class_map
+from ca_sae.eval.posthoc_M import compute_empirical_matrix
 from ca_sae.sae.core import Dictionary
 
 
@@ -96,7 +96,7 @@ def main(
     # Compute empirical A
     # ------------------------------------------------------------------
 
-    empirical_A, class_counts, total_examples = compute_empirical_feature_class_map(
+    empirical_A, class_counts, total_examples = compute_empirical_matrix(
         model=model,
         loader=loader,
         num_classes=num_classes,

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
@@ -43,14 +43,13 @@ def load_examples(
     num_workers: int,
     device: torch.device,
     max_examples: int | None,
-    train_fraction: float,
     seed: int,
 ):
     """
-    Load the activation dataset and create train/test splits.
+    Load the activation dataset and create a DataLoader.
 
     Returns:
-        train_loader, test_loader, num_classes
+        loader
     """
 
     dataset = ActivationsDataset(activations_path)
@@ -64,40 +63,15 @@ def load_examples(
     if len(dataset) < 2:
         raise ValueError("Dataset must contain at least two examples.")
 
-    train_size = int(len(dataset) * train_fraction)
-    test_size = len(dataset) - train_size
-
-    if train_size == 0 or test_size == 0:
-        raise ValueError(
-            f"Invalid train fraction {train_fraction}; "
-            f"dataset has {len(dataset)} examples."
-        )
-
-    generator = torch.Generator().manual_seed(seed)
-
-    train_dataset, test_dataset = random_split(
+    loader = DataLoader(
         dataset,
-        [train_size, test_size],
-        generator=generator,
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=device.type == "cuda",
     )
 
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=device.type == "cuda",
-    )
-
-    return train_loader, test_loader
+    return loader
 
 
 @torch.inference_mode()
@@ -108,7 +82,7 @@ def extract_features(
     probe_k: int | None,
 ):
     """
-    Extract representations.
+    Extract representations, fully materialized in memory.
 
     If model is None:
         representation = raw activation
@@ -118,6 +92,11 @@ def extract_features(
 
     If probe_k is provided, retain the original values of only
     the top-k representation coordinates.
+
+    NOTE: intended for the (smaller) test/held-out split only.
+    For large training sets, use the streamed path in
+    train_linear_probe instead, to avoid materializing the full
+    encoded representation in RAM.
     """
 
     all_features = []
@@ -147,23 +126,48 @@ def extract_features(
     return torch.cat(all_features, dim=0), torch.cat(all_labels, dim=0)
 
 
+def infer_input_dim(model, loader: DataLoader) -> int:
+    """
+    Determine the probe's input dimension without materializing
+    the full dataset. Uses the model's dict_size when available,
+    otherwise peeks at a single batch's raw activation width.
+
+    Note: when model is None, this spins up a separate iterator
+    over loader to peek one batch. This does not consume or skip
+    batches used by the actual training loop, since DataLoader
+    iterators are independent, but it does briefly spawn a worker
+    pool if num_workers > 0.
+    """
+    if model is not None:
+        return model.dict_size
+
+    sample_x, _ = next(iter(loader))
+    return sample_x.shape[1]
+
+
 def train_linear_probe(
-    train_features: torch.Tensor,
-    train_labels: torch.Tensor,
+    model,
+    train_loader: DataLoader,
     num_classes: int,
     epochs: int,
-    batch_size: int,
     learning_rate: float,
     weight_decay: float,
     device: torch.device,
+    probe_k: int | None,
+    input_dim: int,
 ):
     """
     Train a multinomial linear classifier.
 
     The representation is frozen; only the probe parameters are trained.
-    """
 
-    input_dim = train_features.shape[1]
+    Streams batches directly from train_loader through the (frozen)
+    model encoder, rather than pre-extracting and holding the full
+    training representation in memory. This keeps peak memory usage
+    bounded by a single batch, which matters at ImageNet scale where
+    materializing the full encoded train set (e.g. ~1.28M x 4096
+    floats) can exceed available RAM.
+    """
 
     probe = torch.nn.Linear(input_dim, num_classes).to(device)
 
@@ -175,38 +179,44 @@ def train_linear_probe(
 
     criterion = torch.nn.CrossEntropyLoss()
 
-    dataset = torch.utils.data.TensorDataset(
-        train_features,
-        train_labels,
-    )
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        pin_memory=device.type == "cuda",
-    )
-
     probe.train()
 
     for epoch in range(epochs):
         total_loss = 0.0
         total_examples = 0
 
-        for features, labels in tqdm(loader, leave=False):
-            features = features.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+        for x, y in tqdm(train_loader, leave=False):
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).long()
+
+            # Encoding is frozen -- no gradient needed through the SAE
+            # itself. Use no_grad (not inference_mode) so the resulting
+            # tensor remains a normal leaf that the probe's autograd
+            # graph can build on top of.
+            with torch.no_grad():
+                if model is None:
+                    features = x
+                else:
+                    features = model.encode(x)
+
+                if probe_k is not None:
+                    if probe_k > features.shape[1]:
+                        raise ValueError(
+                            f"--probe-k={probe_k} exceeds representation "
+                            f"dimension {features.shape[1]}"
+                        )
+                    features = topk_sparse(features, probe_k)
 
             optimizer.zero_grad(set_to_none=True)
 
             logits = probe(features)
-            loss = criterion(logits, labels)
+            loss = criterion(logits, y)
 
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item() * labels.shape[0]
-            total_examples += labels.shape[0]
+            total_loss += loss.item() * y.shape[0]
+            total_examples += y.shape[0]
 
         mean_loss = total_loss / total_examples
 
@@ -412,7 +422,8 @@ def evaluate_probe(
 
 
 def main(
-    activations_path: str,
+    train_activations_path: str,
+    test_activations_path: str,
     architecture: str | None = None,
     checkpoint_path: str | None = None,
     output_path: str | None = None,
@@ -421,12 +432,12 @@ def main(
     num_workers: int = 4,
     device: str | None = None,
     max_examples: int | None = None,
-    train_fraction: float = 0.8,
     epochs: int = 20,
     probe_batch_size: int = 4096,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-4,
     seed: int = 42,
+    num_classes: int | None = None,
 ):
     """
     Train and evaluate a linear probe on either:
@@ -436,6 +447,11 @@ def main(
 
     If probe_k is provided, only the top-k activation values are retained
     while preserving their original magnitudes.
+
+    The training split is streamed batch-by-batch directly into the
+    probe's training loop (never materialized in full), while the
+    test split is still fully extracted up front since it is small
+    enough to fit comfortably in memory.
     """
 
     if device is None:
@@ -470,30 +486,33 @@ def main(
 
     # ------------------------------------------------------------------
     # Dataset
+    #
+    # Train loader is consumed batch-by-batch directly by the probe
+    # training loop, so it uses probe_batch_size (the size the probe
+    # actually trains on) rather than the feature-extraction batch_size.
     # ------------------------------------------------------------------
 
-    train_loader, test_loader = load_examples(
-        activations_path=activations_path,
+    train_loader = load_examples(
+        activations_path=train_activations_path,
+        batch_size=probe_batch_size,
+        num_workers=num_workers,
+        device=device,
+        max_examples=max_examples,
+        seed=seed,
+    )
+
+    test_loader = load_examples(
+        activations_path=test_activations_path,
         batch_size=batch_size,
         num_workers=num_workers,
         device=device,
         max_examples=max_examples,
-        train_fraction=train_fraction,
         seed=seed,
     )
 
     # ------------------------------------------------------------------
-    # Extract representations
+    # Extract test representations (kept in memory, confirmed to fit)
     # ------------------------------------------------------------------
-
-    print("\nExtracting training representations...")
-
-    train_features, train_labels = extract_features(
-        model=model,
-        loader=train_loader,
-        device=device,
-        probe_k=probe_k,
-    )
 
     print("Extracting test representations...")
 
@@ -504,19 +523,21 @@ def main(
         probe_k=probe_k,
     )
 
-    num_classes = (
-        max(
-            int(train_labels.max()),
-            int(test_labels.max()),
-        )
-        + 1
+    # num_classes can no longer be inferred from train_labels, since
+    # the training set is never materialized. Infer from the test
+    # split, or take an explicit override if the train split might
+    # contain classes absent from test.
+    inferred_num_classes = int(test_labels.max()) + 1
+    resolved_num_classes = (
+        num_classes if num_classes is not None else inferred_num_classes
     )
 
+    input_dim = infer_input_dim(model, train_loader)
+
     print()
-    print(f"Training examples: {len(train_labels):,}")
-    print(f"Test examples:     {len(test_labels):,}")
-    print(f"Representation dim:{train_features.shape[1]:,}")
-    print(f"Number of classes:  {num_classes:,}")
+    print(f"Test examples:      {len(test_labels):,}")
+    print(f"Representation dim: {input_dim:,}")
+    print(f"Number of classes:  {resolved_num_classes:,}")
 
     if probe_k is not None:
         print(f"Probe sparsity k:   {probe_k:,}")
@@ -524,20 +545,22 @@ def main(
         print("Probe sparsity k:   disabled")
 
     # ------------------------------------------------------------------
-    # Train probe
+    # Train probe (streamed -- no full train_features/train_labels
+    # tensor is ever materialized)
     # ------------------------------------------------------------------
 
     print("\n=== Training linear probe ===")
 
     probe = train_linear_probe(
-        train_features=train_features,
-        train_labels=train_labels,
-        num_classes=num_classes,
+        model=model,
+        train_loader=train_loader,
+        num_classes=resolved_num_classes,
         epochs=epochs,
-        batch_size=probe_batch_size,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         device=device,
+        probe_k=probe_k,
+        input_dim=input_dim,
     )
 
     # ------------------------------------------------------------------
@@ -564,8 +587,6 @@ def main(
 
     results["probe_k"] = probe_k
 
-    results["train_fraction"] = train_fraction
-    results["train_examples"] = len(train_labels)
     results["test_examples"] = len(test_labels)
 
     results["epochs"] = epochs
@@ -589,10 +610,9 @@ def main(
     else:
         print(f"Probe sparsity:        Top-{probe_k}")
 
-    print(f"Train examples:        {len(train_labels):,}")
     print(f"Test examples:         {len(test_labels):,}")
-    print(f"Features:              {train_features.shape[1]:,}")
-    print(f"Classes:               {num_classes:,}")
+    print(f"Features:              {input_dim:,}")
+    print(f"Classes:               {resolved_num_classes:,}")
     print()
 
     print(f"Accuracy:              {results['accuracy']:.4f}")
@@ -636,7 +656,14 @@ def cli():
     )
 
     parser.add_argument(
-        "--activations-path",
+        "--train-activations-path",
+        type=str,
+        required=True,
+        help="Path to ActivationsDataset directory.",
+    )
+
+    parser.add_argument(
+        "--test-activations-path",
         type=str,
         required=True,
         help="Path to ActivationsDataset directory.",
@@ -683,7 +710,7 @@ def cli():
         "--batch-size",
         type=int,
         default=4096,
-        help="Batch size for feature extraction.",
+        help="Batch size for test-set feature extraction.",
     )
 
     parser.add_argument(
@@ -714,13 +741,6 @@ def cli():
     )
 
     parser.add_argument(
-        "--train-fraction",
-        type=float,
-        default=0.8,
-        help="Fraction of examples used for probe training.",
-    )
-
-    parser.add_argument(
         "--epochs",
         type=int,
         default=20,
@@ -745,16 +765,25 @@ def cli():
         default=42,
     )
 
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=None,
+        help=(
+            "Optional explicit number of classes. If omitted, inferred "
+            "from the test split's max label + 1. Set explicitly if the "
+            "training split may contain classes absent from the test split."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.probe_k is not None and args.probe_k <= 0:
         parser.error("--probe-k must be > 0")
 
-    if not 0.0 < args.train_fraction < 1.0:
-        parser.error("--train-fraction must be between 0 and 1")
-
     main(
-        activations_path=args.activations_path,
+        train_activations_path=args.train_activations_path,
+        test_activations_path=args.test_activations_path,
         architecture=args.architecture,
         checkpoint_path=args.checkpoint_path,
         output_path=args.output_path,
@@ -763,12 +792,12 @@ def cli():
         num_workers=args.num_workers,
         device=args.device,
         max_examples=args.max_examples,
-        train_fraction=args.train_fraction,
         epochs=args.epochs,
         probe_batch_size=args.probe_batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         seed=args.seed,
+        num_classes=args.num_classes,
     )
 
 

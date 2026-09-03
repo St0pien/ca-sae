@@ -118,11 +118,11 @@ def main(
         "mean_feature_test_budget": float(test_posthoc_k.mean()),
         "min_feature_test_budget": float(test_posthoc_k.min()),
         "max_feature_test_budget": float(test_posthoc_k.max()),
-        "mean_cosine": matrix_honesty.cosine.mean(),
-        "median_cosine": matrix_honesty.cosine.median(),
-        "mean_precision_at_ceil_k": matrix_honesty.precision.mean(),
-        "mean_recall_at_ceil_k": matrix_honesty.recall.mean(),
-        "mean_f1_at_ceil_k": matrix_honesty.f1.mean(),
+        "mean_cosine": matrix_honesty.cosine.mean().item(),
+        "median_cosine": matrix_honesty.cosine.median().item(),
+        "mean_precision_at_ceil_k": matrix_honesty.precision.mean().item(),
+        "mean_recall_at_ceil_k": matrix_honesty.recall.mean().item(),
+        "mean_f1_at_ceil_k": matrix_honesty.f1.mean().item(),
     }
 
     print("\n=== SoftSAE-CA Honesty Evaluation ===")

@@ -156,8 +156,6 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         # alpha is a registered scalar buffer, so it is recoverable.
         alpha = state_dict["alpha"].item()
 
-        tau = state_dict["tau"].item() if "tau" in state_dict else 1.0
-
         with open(f"{path}/config.json") as f_config:
             json_config = json.load(f_config)
             features_per_class = json_config["sae"]["features_per_class"]
@@ -168,7 +166,6 @@ class ClassAlignedSAE(Dictionary, nn.Module):
             num_classes=num_classes,
             features_per_class=features_per_class,
             alpha=alpha,
-            tau=tau,
         )
 
         model.load_state_dict(state_dict)
@@ -259,7 +256,6 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.use_hard_topk = 0
         self.avg_enc_grad = 0
         self.avg_mlp_grad = 0
-        self.active_tau = cfg.tau_anneal_start
 
         ### LOGGING SETUP
 

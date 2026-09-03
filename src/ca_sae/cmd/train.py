@@ -233,32 +233,37 @@ def main(cfg: TrainConfig):
 if __name__ == "__main__":
     main(
         TrainConfig(
-            activations_path="activations/imagenet_val_dino",
-            # sae=ClassAlignedSAEConfig(
-            #     512,
-            #     4096,
-            #     64,
-            #     lr=6e-4,
-            #     soft_topk_alpha=0.001,
-            #     # hard_topk_steps=2000,
-            #     # alpha_anneal_steps=1000,
-            #     decay_start=5000,
-            #     agreement_loss_weight=0.15,
-            # ),
-            sae=BatchTopKSAEConfig(
+            activations_path="activations/imagenet_train_L_14",
+            sae=ClassAlignedSAEConfig(
                 768,
                 4096,
-                63,
+                64,
                 lr=6e-4,
-                decay_start=5000,
+                soft_topk_alpha=0.001,
+                # hard_topk_steps=2000,
+                # alpha_anneal_steps=8000,
+                decay_start=5_000,
+                agreement_loss_weight=0.2,
+                k_loss_weight=20.0,
+                dead_feature_threshold=2_000_000,
+                agreement_tau=1.0,
+                # tau_anneal_steps=5_000,
+                features_per_class=150,
             ),
-            epochs=30,
-            save_dir="checkpoints/test/asdf",
-            # wandb=WandbConfig(
-            #     entity="st0pien-default-team",
-            #     project="CASAE",
-            #     name="ca_sae_v2",
+            # sae=BatchTopKSAEConfig(
+            #     768,
+            #     4096,
+            #     63,
+            #     lr=6e-4,
+            #     decay_start=5000,
             # ),
-            # dataloader=DataLoaderConfig(num_workers=4, prefetch_factor=3),
+            epochs=30,
+            save_dir="checkpoints/test/big-boy",
+            wandb=WandbConfig(
+                entity="st0pien-default-team",
+                project="CASAE",
+                name="big-boy-test",
+            ),
+            dataloader=DataLoaderConfig(num_workers=4, batch_size=4096),
         )
     )
