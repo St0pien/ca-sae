@@ -28,7 +28,6 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         num_classes: int,
         features_per_class: int,
         alpha: float,
-        tau: float = 1.0,
     ):
         super().__init__()
         self.activation_dim = activation_dim
@@ -37,7 +36,6 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         self.features_per_class = features_per_class
 
         self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
-        self.register_buffer("tau", torch.tensor(tau, dtype=torch.float32))
         self.register_buffer("norm_factor", torch.tensor(1.0))
 
         self.decoder = nn.Linear(dict_size, activation_dim, bias=False)
@@ -211,13 +209,14 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.tau_anneal_start = cfg.tau_anneal_start
         self.tau_anneal_steps = cfg.tau_anneal_steps
 
+        self.active_tau = cfg.agreement_tau
+
         self.ae = ClassAlignedSAE(
             cfg.activation_dim,
             cfg.dict_size,
             cfg.num_classes,
             cfg.features_per_class,
             cfg.soft_topk_alpha,
-            cfg.agreement_tau,
         )
 
         if cfg.lr is not None:
@@ -242,7 +241,7 @@ class ClassAlignedSAETrainer(SAETrainer):
             "k_loss",
             "agreement_loss",
             "ae_soft_topk_alpha",
-            "ae_tau",
+            "active_tau",
             "use_hard_topk",
             "lr_log",
             "avg_enc_grad",
@@ -259,7 +258,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.use_hard_topk = 0
         self.avg_enc_grad = 0
         self.avg_mlp_grad = 0
-        self.ae_tau = cfg.tau_anneal_start
+        self.active_tau = cfg.tau_anneal_start
 
         ### LOGGING SETUP
 
@@ -325,7 +324,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         annealed_value = (
             self.tau_anneal_start * (1 - ratio) + self.agreement_tau * ratio
         )
-        self.ae.tau.fill_(annealed_value)
+        self.active_tau = annealed_value
 
     def get_auxiliary_loss(
         self, residual_BD: torch.Tensor, post_relu_acts_BF: torch.Tensor
@@ -388,7 +387,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         # Scores against every class, not just the true one
         s = pi @ M  # [B, C]
 
-        tau = self.ae.tau
+        tau = self.active_tau
 
         # True-class score
         s_true = s.gather(1, labels.unsqueeze(-1)).squeeze(-1)  # [B]
@@ -429,7 +428,6 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.min_k = k_hat.min()
         self.max_k = k_hat.max()
         self.ae_soft_topk_alpha = self.ae.alpha.clone()
-        self.ae_tau = self.ae.tau.item()
         self.lr_log = self.scheduler.get_last_lr()[0]
 
         l2_loss = e.pow(2).sum(dim=-1).mean()
