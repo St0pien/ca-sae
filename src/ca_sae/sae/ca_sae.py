@@ -65,10 +65,11 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         return torch.clamp(k_hat, min=1, max=self.dict_size)
 
     def calculate_M(self):
-        Ktot = self.features_per_class * self.dict_size
+        Ktot = float(self.features_per_class * self.dict_size)
 
         # Compute per feature association budget
         k = Ktot * torch.softmax(self.budget_vector, dim=0)
+        k = torch.clamp(k, 1.0, float(self.num_classes))
 
         M = soft_topk(self.class_matrix, k.unsqueeze(-1), self.alpha.clone(), dim=1)
 
