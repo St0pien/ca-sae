@@ -5,32 +5,10 @@ from pathlib import Path
 import clip
 import numpy as np
 import torch
-from datasets import load_dataset
 from torch.utils.data.dataloader import DataLoader
-from torch.utils.data.dataset import Dataset
-from PIL import Image
 from tqdm import tqdm
 
-
-class ImageNetDataset(Dataset):
-    def __init__(self, preprocess, split):
-        self.dataset = load_dataset("ILSVRC/imagenet-1k", split=split)
-        self.len = self.dataset.info.splits[split].num_examples
-        self.preprocess = preprocess
-
-    def __len__(self):
-        return self.len
-
-    def __getitem__(self, index):
-        item = self.dataset[index]
-        sample, target = item["image"], item["label"]
-
-        if isinstance(sample, Image.Image):
-            sample = sample.convert("RGB")
-        if self.preprocess:
-            sample = self.preprocess(sample)
-
-        return sample, target
+from ca_sae.dataset import ImageNetDataset
 
 
 def main(

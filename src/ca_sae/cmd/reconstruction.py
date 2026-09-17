@@ -9,10 +9,7 @@ from tqdm import tqdm
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
-from ca_sae.sae.batch_top_k import BatchTopKSAE
-from ca_sae.sae.ca_sae import ClassAlignedSAE
 from ca_sae.sae.core import Dictionary
-from ca_sae.sae.softsae import SoftSAE
 
 
 @torch.no_grad()

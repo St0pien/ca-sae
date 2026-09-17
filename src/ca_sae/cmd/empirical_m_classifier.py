@@ -367,7 +367,7 @@ def main(
         print("Using built in M matrix")
         train_A = model.class_matrix
         M = model.calculate_M()
-        k = torch.softmax(model.budget_vector, dim=0) * model.features_per_class * d
+        k = torch.softmax(model.budget_vector, dim=0) * model.rho * d
     else:
         print(
             f"Loading precomputed empirical feature-class matrix from: {precomputed_train_matrix}"

@@ -1,0 +1,9 @@
+_target_: ca_sae.sae.matryoshka_batch_topk.MatryoshkaBatchTopKSAEConfig
+activation_dim: 768
+k: 380
+dict_size: 16384
+lr: 6e-4
+decay_start: 5000
+dead_feature_threshold: 2_000_000
+group_fractions: [0.015625, 0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5]  # 256, 256, 512, 1024, 2048, 4096, 8192 (last one absorbs remainder -> 8192)
+# group_weights: [0.05, 0.05, 0.075, 0.1, 0.15, 0.225, 0.35]

@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 
 import torch
-from lapsum.topk import soft_topk
 from torch.utils.data import DataLoader
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES

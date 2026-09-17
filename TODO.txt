@@ -27,3 +27,18 @@ Fraction of classes where graded beats shuffled:  0.99
 Wilcoxon signed-rank (graded vs shuffled):         stat=0.000 p=0.0000
 Mean retain-accuracy collateral, graded / shuffled: -0.0046 / -0.0039
 Corr(baseline accuracy, graded drop):             r=-0.021 p=0.8340
+
+
+- Make ca-sae ablation in config
+- Rewrite abstract and introduction
+    - Sae instability, class alignment picks one
+    - differentiation through selection, better guidance
+    - better separability for editing
+    - Out of the box annotation matrix
+
+- Add M based editing to tpp
+
+
+- Rename top_k to top_k
+- precompute give names of clips
+- feature_per_class -> rho

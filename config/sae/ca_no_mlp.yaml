@@ -1,0 +1,11 @@
+_target_: ca_sae.sae.ca_sae_abl.ClassAlignedSAE_NO_MLP_Config
+activation_dim: 768
+dict_size: 16384
+k: 380
+lr: 6e-4
+soft_topk_alpha: 0.001
+decay_start: 5000
+agreement_loss_weight: 0.2
+dead_feature_threshold: 2_000_000
+agreement_tau: 1.0
+rho: 40

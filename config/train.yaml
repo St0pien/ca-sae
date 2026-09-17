@@ -1,0 +1,21 @@
+defaults:
+  - sae: ca_sae
+  - wandb: default
+  - _self_
+
+_target_: ca_sae.sae.config.TrainConfig
+
+activations_path: activations/imagenet_train_L_14
+epochs: 50
+save_dir: checkpoints/test/batch_topk_big_dict
+
+device: cuda
+normalize_activations: true
+
+seed: 0
+
+dataloader:
+  _target_: ca_sae.sae.config.DataLoaderConfig
+  num_workers: 4
+  batch_size: 4096
+  prefetch_factor: 2

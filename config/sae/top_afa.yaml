@@ -1,0 +1,6 @@
+_target_: ca_sae.sae.top_afa.TopAFASAEConfig
+activation_dim: 768
+dict_size: 16384
+lr: 6e-4
+decay_start: 5000
+dead_feature_threshold: 2_000_000

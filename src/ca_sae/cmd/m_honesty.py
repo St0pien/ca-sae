@@ -7,8 +7,8 @@ from torch.utils.data import DataLoader
 
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.eval.matrix_honesty import calculate_matrix_honesty
+from ca_sae.eval.posthoc_M import build_posthoc_M, compute_empirical_matrix
 from ca_sae.sae.ca_sae import ClassAlignedSAE
-from ca_sae.eval.posthoc_M import compute_empirical_matrix, build_posthoc_M
 
 
 @torch.inference_mode()
@@ -84,9 +84,9 @@ def main(
     # This mirrors ClassAlignedSAETrainer.get_agreement_loss().
     # ------------------------------------------------------------------
 
-    test_posthoc_M, test_posthoc_k = build_posthoc_M(test_A, model.features_per_class)
+    test_posthoc_M, test_posthoc_k = build_posthoc_M(test_A, model.rho)
 
-    Ktot = model.features_per_class * d
+    Ktot = model.rho * d
 
     k = Ktot * torch.softmax(
         model.budget_vector,

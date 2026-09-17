@@ -26,14 +26,14 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         activation_dim: int,
         dict_size: int,
         num_classes: int,
-        features_per_class: int,
+        rho: int,
         alpha: float,
     ):
         super().__init__()
         self.activation_dim = activation_dim
         self.dict_size = dict_size
         self.num_classes = num_classes
-        self.features_per_class = features_per_class
+        self.rho = rho
 
         self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
         self.register_buffer("norm_factor", torch.tensor(1.0))
@@ -65,7 +65,7 @@ class ClassAlignedSAE(Dictionary, nn.Module):
         return torch.clamp(k_hat, min=1, max=self.dict_size)
 
     def calculate_M(self):
-        Ktot = float(self.features_per_class * self.dict_size)
+        Ktot = float(self.rho * self.dict_size)
 
         # Compute per feature association budget
         k = Ktot * torch.softmax(self.budget_vector, dim=0)
@@ -158,13 +158,13 @@ class ClassAlignedSAE(Dictionary, nn.Module):
 
         with open(f"{path}/config.json") as f_config:
             json_config = json.load(f_config)
-            features_per_class = json_config["sae"]["features_per_class"]
+            rho = json_config["sae"]["rho"]
 
         model = cls(
             activation_dim=activation_dim,
             dict_size=dict_size,
             num_classes=num_classes,
-            features_per_class=features_per_class,
+            rho=rho,
             alpha=alpha,
         )
 
@@ -181,7 +181,7 @@ class ClassAlignedSAEConfig(SAEConfig):
     soft_topk_alpha: float = 0.001
     alpha_anneal_steps: Optional[int] = None
     num_classes: int = 1000
-    features_per_class: int = 5
+    rho: int = 5
     agreement_loss_weight: float = 1.0
     agreement_tau: float = 1.0
     tau_anneal_start: float = 50.0
@@ -213,7 +213,7 @@ class ClassAlignedSAETrainer(SAETrainer):
             cfg.activation_dim,
             cfg.dict_size,
             cfg.num_classes,
-            cfg.features_per_class,
+            cfg.rho,
             cfg.soft_topk_alpha,
         )
 
@@ -226,7 +226,7 @@ class ClassAlignedSAETrainer(SAETrainer):
 
         self.auxk_alpha = cfg.auxk_alpha
         self.dead_feature_threshold = cfg.dead_feature_threshold
-        self.top_k_aux = cfg.activation_dim // 2  # Heuristic from B.1 of the paper
+        self.topk_aux = cfg.activation_dim // 2  # Heuristic from B.1 of the paper
         self.num_tokens_since_fired = torch.zeros(cfg.dict_size, dtype=torch.long)
 
         ### LOGGING SETUP
@@ -330,7 +330,7 @@ class ClassAlignedSAETrainer(SAETrainer):
         self.dead_features = int(dead_features.sum())
 
         if dead_features.sum() > 0:
-            k_aux = min(self.top_k_aux, dead_features.sum())
+            k_aux = min(self.topk_aux, dead_features.sum())
 
             auxk_latents = torch.where(
                 dead_features[None], post_relu_acts_BF, -torch.inf

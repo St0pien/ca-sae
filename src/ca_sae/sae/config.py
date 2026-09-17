@@ -17,7 +17,6 @@ class WandbConfig:
 class SAEConfig:
     activation_dim: int
     dict_size: int
-    k: int
     lr: Optional[float] = None
     auxk_alpha: float = 1 / 32
     warmup_steps: int = 1000
@@ -46,3 +45,4 @@ class TrainConfig:
     wandb: Optional[WandbConfig] = None
     save_dir: Optional[str] = None
     normalize_activations: bool = True
+    seed: int = 0

@@ -1,29 +1,39 @@
 import json
+import random
 from contextlib import nullcontext
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 
+import hydra
 import numpy as np
 import torch
+from hydra.utils import instantiate
+from omegaconf import DictConfig
+from torch.utils.data import Sampler
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
 import wandb
 from ca_sae.dataset import ActivationsDataset
-from ca_sae.sae.batch_top_k import BatchTopKSAEConfig, BatchTopKTrainer
+from ca_sae.sae.batch_topk import BatchTopKSAEConfig, BatchTopKTrainer
 from ca_sae.sae.ca_sae import ClassAlignedSAEConfig, ClassAlignedSAETrainer
+from ca_sae.sae.ca_sae_abl import (
+    ClassAlignedSAE_NO_MLP_Config,
+    ClassAlignedSAE_NO_MLP_Trainer,
+)
 from ca_sae.sae.config import (
     AUTOCAST_DTYPE,
     SAEConfig,
     TrainConfig,
-    WandbConfig,
-    DataLoaderConfig,
 )
 from ca_sae.sae.core import SAETrainer
+from ca_sae.sae.matryoshka_batch_topk import (
+    MatryoshkaBatchTopKSAEConfig,
+    MatryoshkaBatchTopKTrainer,
+)
 from ca_sae.sae.softsae import SoftSAEConfig, SoftSAETrainer
-
-
-from torch.utils.data import Sampler
+from ca_sae.sae.top_afa import TopAFASAEConfig, TopAFATrainer
 
 
 class ChunkBatchSampler(Sampler):
@@ -92,8 +102,14 @@ class ChunkBatchSampler(Sampler):
 def make_sae_trainer(steps: int, cfg: SAEConfig) -> SAETrainer:
     if isinstance(cfg, BatchTopKSAEConfig):
         return BatchTopKTrainer(steps, cfg)
+    elif isinstance(cfg, MatryoshkaBatchTopKSAEConfig):
+        return MatryoshkaBatchTopKTrainer(steps, cfg)
+    elif isinstance(cfg, TopAFASAEConfig):
+        return TopAFATrainer(steps, cfg)
     elif isinstance(cfg, SoftSAEConfig):
         return SoftSAETrainer(steps, cfg)
+    elif isinstance(cfg, ClassAlignedSAE_NO_MLP_Config):
+        return ClassAlignedSAE_NO_MLP_Trainer(steps, cfg)
     elif isinstance(cfg, ClassAlignedSAEConfig):
         return ClassAlignedSAETrainer(steps, cfg)
     else:
@@ -137,7 +153,9 @@ def get_stats(trainer: SAETrainer, step: int, act: torch.Tensor, labels: torch.T
         x = act.clone()
         y = labels.clone()
         log = {}
-        if isinstance(trainer, ClassAlignedSAETrainer):
+        if isinstance(trainer, ClassAlignedSAETrainer) or isinstance(
+            trainer, ClassAlignedSAE_NO_MLP_Trainer
+        ):
             x, x_hat, f, losslog = trainer.loss(x, y, step=step, logging=True)
         else:
             x, x_hat, f, losslog = trainer.loss(x, step=step, logging=True)
@@ -164,7 +182,23 @@ def get_stats(trainer: SAETrainer, step: int, act: torch.Tensor, labels: torch.T
     return log
 
 
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def seed_worker(worker_id: int, base_seed: int) -> None:
+    worker_seed = base_seed + worker_id
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
+
 def main(cfg: TrainConfig):
+    seed_everything(cfg.seed)
+
     autocast_context = (
         nullcontext()
         if cfg.device == "cpu"
@@ -190,13 +224,15 @@ def main(cfg: TrainConfig):
         dataset_size=len(dataset),
         batch_size=cfg.dataloader.batch_size,
         chunk_size=262_144,
-        seed=42,
+        seed=cfg.seed,
     )
     dataloader = DataLoader(
         dataset,
         batch_sampler=batch_sampler,
         num_workers=cfg.dataloader.num_workers,
         prefetch_factor=cfg.dataloader.prefetch_factor,
+        worker_init_fn=partial(seed_worker, base_seed=cfg.seed),
+        generator=torch.Generator().manual_seed(cfg.seed),
     )
 
     trainer = make_sae_trainer(cfg.epochs * len(dataloader), cfg.sae)
@@ -230,40 +266,11 @@ def main(cfg: TrainConfig):
         torch.save(final, save_dir / "ae.pt")
 
 
+@hydra.main(version_base=None, config_path="../../../config", config_name="train")
+def cli(cfg: DictConfig) -> None:
+    train_cfg: TrainConfig = instantiate(cfg, _convert_="object")
+    main(train_cfg)
+
+
 if __name__ == "__main__":
-    main(
-        TrainConfig(
-            activations_path="activations/imagenet_train_L_14",
-            sae=ClassAlignedSAEConfig(
-                768,
-                4096,
-                64,
-                lr=6e-4,
-                soft_topk_alpha=0.001,
-                # hard_topk_steps=2000,
-                # alpha_anneal_steps=8000,
-                decay_start=5_000,
-                agreement_loss_weight=0.2,
-                k_loss_weight=20.0,
-                dead_feature_threshold=2_000_000,
-                agreement_tau=1.0,
-                # tau_anneal_steps=5_000,
-                features_per_class=150,
-            ),
-            # sae=BatchTopKSAEConfig(
-            #     768,
-            #     4096,
-            #     63,
-            #     lr=6e-4,
-            #     decay_start=5000,
-            # ),
-            epochs=30,
-            save_dir="checkpoints/test/big-boy",
-            wandb=WandbConfig(
-                entity="st0pien-default-team",
-                project="CASAE",
-                name="big-boy-test",
-            ),
-            dataloader=DataLoaderConfig(num_workers=4, batch_size=4096),
-        )
-    )
+    cli()

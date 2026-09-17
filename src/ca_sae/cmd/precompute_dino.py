@@ -4,12 +4,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from datasets import load_dataset
-from torch.utils.data import DataLoader, Dataset
-from PIL import Image
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoImageProcessor, AutoModel
-from .precompute_imagenet import ImageNetDataset
+
+from ca_sae.dataset import ImageNetDataset
 
 
 def make_collate_fn(processor):
