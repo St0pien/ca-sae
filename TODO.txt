@@ -29,7 +29,6 @@ Mean retain-accuracy collateral, graded / shuffled: -0.0046 / -0.0039
 Corr(baseline accuracy, graded drop):             r=-0.021 p=0.8340
 
 
-- Make ca-sae ablation in config
 - Rewrite abstract and introduction
     - Sae instability, class alignment picks one
     - differentiation through selection, better guidance
@@ -38,7 +37,4 @@ Corr(baseline accuracy, graded drop):             r=-0.021 p=0.8340
 
 - Add M based editing to tpp
 
-
-- Rename top_k to top_k
-- precompute give names of clips
-- feature_per_class -> rho
+- Refactor tpp with mutual information

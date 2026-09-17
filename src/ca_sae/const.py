@@ -1,6 +1,6 @@
 from ca_sae.sae.batch_topk import BatchTopKSAE
 from ca_sae.sae.ca_sae import ClassAlignedSAE
-from ca_sae.sae.ca_sae_abl import ClassAlignedSAE_NO_MLP
+from ca_sae.sae.ca_sae_no_mlp import ClassAlignedSAE_NO_MLP
 from ca_sae.sae.matryoshka_batch_topk import MatryoshkaBatchTopKSAE
 from ca_sae.sae.top_afa import TopAFASAE
 

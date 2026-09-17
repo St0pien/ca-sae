@@ -55,6 +55,7 @@ from tqdm import tqdm
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.ca_sae import ClassAlignedSAE
+from ca_sae.sae.core import is_class_aligned
 
 try:
     from scipy.stats import pearsonr, spearmanr
@@ -447,7 +448,7 @@ def main(
     calibration = None
     eff_classes_claimed = None
     if check_trained_M:
-        if not isinstance(model, ClassAlignedSAE):
+        if not is_class_aligned(model):
             print(
                 "\n[note] --check-trained-M was set but model is not a ClassAlignedSAE "
                 "(no calculate_M() available); skipping calibration check."

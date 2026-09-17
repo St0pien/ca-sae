@@ -10,6 +10,7 @@ from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.eval.posthoc_M import build_posthoc_M
 from ca_sae.sae.ca_sae import ClassAlignedSAE
+from ca_sae.sae.core import is_class_aligned
 
 
 @torch.inference_mode()
@@ -363,7 +364,7 @@ def main(
 
     print("\nComputing empirical feature-class matrix " "on training data...")
 
-    if isinstance(model, ClassAlignedSAE) and precomputed_train_matrix is None:
+    if is_class_aligned(model) and precomputed_train_matrix is None:
         print("Using built in M matrix")
         train_A = model.class_matrix
         M = model.calculate_M()

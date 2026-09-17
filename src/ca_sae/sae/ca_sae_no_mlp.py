@@ -117,7 +117,7 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
         self.norm_factor.fill_(scale)
 
     @classmethod
-    def from_pretrained(cls, path, device=None, **kwargs) -> "ClassAlignedSAE":
+    def from_pretrained(cls, path, device=None, **kwargs) -> "ClassAlignedSAE_NO_MLP":
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         state_dict = torch.load(
@@ -152,7 +152,6 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
             json_config = json.load(f_config)
             rho = json_config["sae"]["rho"]
 
-        print(list(state_dict.keys()))
         k = state_dict["k"].item()
 
         model = cls(

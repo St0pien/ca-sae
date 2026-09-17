@@ -5,6 +5,8 @@ import einops
 import torch
 import torch.nn as nn
 
+from ca_sae.sae.ca_sae import ClassAlignedSAE
+from ca_sae.sae.ca_sae_no_mlp import ClassAlignedSAE_NO_MLP
 from ca_sae.sae.config import SAEConfig
 
 
@@ -215,3 +217,9 @@ def topk_per_row(x, k):
     out.scatter_(1, idx, vals)
 
     return out
+
+
+def is_class_aligned(model: Dictionary) -> bool:
+    return isinstance(model, ClassAlignedSAE) or isinstance(
+        model, ClassAlignedSAE_NO_MLP
+    )

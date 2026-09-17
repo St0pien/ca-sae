@@ -18,7 +18,7 @@ import wandb
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.batch_topk import BatchTopKSAEConfig, BatchTopKTrainer
 from ca_sae.sae.ca_sae import ClassAlignedSAEConfig, ClassAlignedSAETrainer
-from ca_sae.sae.ca_sae_abl import (
+from ca_sae.sae.ca_sae_no_mlp import (
     ClassAlignedSAE_NO_MLP_Config,
     ClassAlignedSAE_NO_MLP_Trainer,
 )
@@ -27,7 +27,7 @@ from ca_sae.sae.config import (
     SAEConfig,
     TrainConfig,
 )
-from ca_sae.sae.core import SAETrainer
+from ca_sae.sae.core import SAETrainer, is_class_aligned
 from ca_sae.sae.matryoshka_batch_topk import (
     MatryoshkaBatchTopKSAEConfig,
     MatryoshkaBatchTopKTrainer,
@@ -153,9 +153,7 @@ def get_stats(trainer: SAETrainer, step: int, act: torch.Tensor, labels: torch.T
         x = act.clone()
         y = labels.clone()
         log = {}
-        if isinstance(trainer, ClassAlignedSAETrainer) or isinstance(
-            trainer, ClassAlignedSAE_NO_MLP_Trainer
-        ):
+        if is_class_aligned(trainer.ae):
             x, x_hat, f, losslog = trainer.loss(x, y, step=step, logging=True)
         else:
             x, x_hat, f, losslog = trainer.loss(x, step=step, logging=True)
