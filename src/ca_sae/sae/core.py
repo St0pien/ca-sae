@@ -5,8 +5,6 @@ import einops
 import torch
 import torch.nn as nn
 
-from ca_sae.sae.ca_sae import ClassAlignedSAE
-from ca_sae.sae.ca_sae_no_mlp import ClassAlignedSAE_NO_MLP
 from ca_sae.sae.config import SAEConfig
 
 
