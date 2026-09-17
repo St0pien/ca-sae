@@ -15,6 +15,7 @@ from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
 import wandb
+from ca_sae.const import is_class_aligned
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.sae.batch_topk import BatchTopKSAEConfig, BatchTopKTrainer
 from ca_sae.sae.ca_sae import ClassAlignedSAEConfig, ClassAlignedSAETrainer
@@ -27,7 +28,7 @@ from ca_sae.sae.config import (
     SAEConfig,
     TrainConfig,
 )
-from ca_sae.sae.core import SAETrainer, is_class_aligned
+from ca_sae.sae.core import SAETrainer
 from ca_sae.sae.matryoshka_batch_topk import (
     MatryoshkaBatchTopKSAEConfig,
     MatryoshkaBatchTopKTrainer,
