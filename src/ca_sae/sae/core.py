@@ -217,9 +217,3 @@ def topk_per_row(x, k):
     out.scatter_(1, idx, vals)
 
     return out
-
-
-def is_class_aligned(model: Dictionary) -> bool:
-    return isinstance(model, ClassAlignedSAE) or isinstance(
-        model, ClassAlignedSAE_NO_MLP
-    )
