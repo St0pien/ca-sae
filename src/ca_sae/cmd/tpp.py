@@ -54,10 +54,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+from lapsum.topk import soft_topk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ca_sae.const import SUPPORTED_ARCHITECTURES
+from ca_sae.const import SUPPORTED_ARCHITECTURES, is_class_aligned
 from ca_sae.dataset import ActivationsDataset
 from ca_sae.eval.pmi import (
     compute_conditional_and_priors,
@@ -65,6 +66,8 @@ from ca_sae.eval.pmi import (
     compute_pmi,
     normalize_pmi_to_unit_interval,
 )
+from ca_sae.sae.ca_sae import ClassAlignedSAE
+from ca_sae.sae.ca_sae_no_mlp import ClassAlignedSAE_NO_MLP
 
 try:
     from scipy.stats import pearsonr, wilcoxon
@@ -143,6 +146,45 @@ def compute_activation_reference_scale(
 
 
 # ======================================================================
+# Analytic (no-estimation-pass) alternative for class-aligned SAEs
+# ======================================================================
+
+
+def compute_native_selection_weights(
+    model, x_batch: torch.Tensor
+) -> torch.Tensor:
+    """
+    Model-native, per-sample stand-in for the empirically-estimated
+    activation-strength signal: the same soft Top-K selection weights
+    p(x) (Eq. 1 in modyfikacja.tex) the class-aligned SAE already
+    computes internally to train its agreement loss. These are bounded
+    in (0,1) per feature by construction of the Soft Top-K operator, so
+    -- unlike raw z -- they need no separate reference-scale estimation
+    pass to be comparable across features.
+
+    Only defined for the two class-aligned architectures (see
+    `is_class_aligned`), since their `encode()` signatures differ in
+    how the soft weights are (or aren't) exposed.
+    """
+    if isinstance(model, ClassAlignedSAE):
+        _, _, _, weights, _, _ = model.encode(
+            x_batch, return_active=True, use_hard_topk=False
+        )
+        return weights
+    elif isinstance(model, ClassAlignedSAE_NO_MLP):
+        f, _, post_relu_acts = model.encode(
+            x_batch, return_active=True, use_threshold=False
+        )
+        k_hat_sim = (f > 0).sum(dim=1).clamp_min(1).float()
+        return soft_topk(post_relu_acts, k_hat_sim.unsqueeze(1), model.alpha.clone())
+    else:
+        raise TypeError(
+            f"compute_native_selection_weights does not support {type(model)}; "
+            "is_class_aligned(model) should be checked before calling this."
+        )
+
+
+# ======================================================================
 # Building and applying the graded edit
 # ======================================================================
 
@@ -182,12 +224,20 @@ def graded_edit_and_probe(
     edit_strength_scale: float,
     chunk_size: int,
     device: torch.device,
+    use_native_activation_strength: bool = False,
 ) -> dict:
     """
     Same measurement contract as the original ablate_and_probe:
     forget_accuracy on target-class samples, retain_accuracy on
     everything else, mean post-edit logit for target_class. The edit
     itself is now z' = z * (1 - strength) instead of a hard zero-mask.
+
+    When `use_native_activation_strength` is set (analytic mode for
+    class-aligned SAEs), the activation-strength term feeding
+    `build_strength_vector` is the model's own native soft selection
+    weights (see `compute_native_selection_weights`) instead of the
+    empirically-normalized raw code -- `ref_scale` is then expected to
+    be all-ones, since those weights are already bounded in (0,1).
     """
     ref_scale = ref_scale.to(device)
     info_c = info_c.to(device)
@@ -206,7 +256,13 @@ def graded_edit_and_probe(
         labels_batch = labels_all[start:end].to(device)
 
         z = model.encode(x_batch)
-        strength = build_strength_vector(z, ref_scale, info_c, edit_strength_scale)
+        if use_native_activation_strength:
+            activation_signal = compute_native_selection_weights(model, x_batch)
+        else:
+            activation_signal = z
+        strength = build_strength_vector(
+            activation_signal, ref_scale, info_c, edit_strength_scale
+        )
         z_edited = z * (1.0 - strength)
         x_hat = model.decode(z_edited)
 
@@ -518,6 +574,7 @@ def main(
     train_activations_path: str,
     test_activations_path: str,
     pmi_activations_path: str | None,
+    no_empirical: bool,
     target_classes: list[int] | None,
     num_random_target_classes: int,
     edit_strength_scale: float,
@@ -547,6 +604,12 @@ def main(
     )
     model.eval()
 
+    if no_empirical and not is_class_aligned(model):
+        raise ValueError(
+            "--no-empirical requires a class-aligned SAE architecture "
+            f"(got --architecture={architecture!r}, is_class_aligned(model) is False)."
+        )
+
     print(
         "Loading probe-training activations (clean, never touched by the SAE again)..."
     )
@@ -566,37 +629,62 @@ def main(
     num_classes = int(y_train.max().item()) + 1
 
     # ------------------------------------------------------------
-    # PMI(i, c) and per-feature activation reference scale, both
-    # estimated on held-out reference data (defaults to the probe's
-    # training split if a separate one isn't given -- see caveat in
-    # the printed note below about what this does and doesn't buy you).
+    # Informativeness info[i, c] and per-feature activation reference
+    # scale ref_scale[i]. Either estimated empirically on held-out
+    # reference data, or, for class-aligned SAEs, read directly off the
+    # model (--no-empirical): the feature-class affinity
+    # matrix M from calculate_M() stands in for PMI, and an all-ones
+    # ref_scale is used because the native selection weights plugged in
+    # as the activation signal (see compute_native_selection_weights)
+    # are already bounded in (0,1) by construction.
     # ------------------------------------------------------------
-    if pmi_activations_path is not None:
-        print("Loading separate activations for PMI / activation-scale estimation...")
-        x_pmi, y_pmi = load_all_activations(
-            pmi_activations_path, batch_size, num_workers
-        )
-    else:
+    if no_empirical:
+        if pmi_activations_path is not None:
+            print(
+                "[note] --no-empirical is set; ignoring "
+                "--pmi-activations-path -- no empirical estimation pass is run."
+            )
         print(
-            "[note] --pmi-activations-path not given; reusing the probe-training split "
-            "for PMI and activation-scale estimation. This does not leak test labels, "
-            "but if you want PMI estimated fully independently of anything the probe "
-            "saw, pass a third, disjoint split explicitly."
+            "Using the model's own feature-class affinity matrix M (calculate_M()) "
+            "as informativeness, and its native soft Top-K selection weights as the "
+            "per-sample activation-strength signal -- no empirical estimation pass."
         )
-        x_pmi, y_pmi = x_train, y_train
+        info = model.calculate_M().detach().cpu()  # [d, C]
+        if info.shape[1] != num_classes:
+            raise ValueError(
+                f"model.calculate_M() has {info.shape[1]} classes but the loaded "
+                f"labels imply {num_classes}; refusing to silently misalign columns."
+            )
+        ref_scale = torch.ones(model.dict_size)
+    else:
+        if pmi_activations_path is not None:
+            print(
+                "Loading separate activations for PMI / activation-scale estimation..."
+            )
+            x_pmi, y_pmi = load_all_activations(
+                pmi_activations_path, batch_size, num_workers
+            )
+        else:
+            print(
+                "[note] --pmi-activations-path not given; reusing the probe-training "
+                "split for PMI and activation-scale estimation. This does not leak "
+                "test labels, but if you want PMI estimated fully independently of "
+                "anything the probe saw, pass a third, disjoint split explicitly."
+            )
+            x_pmi, y_pmi = x_train, y_train
 
-    p_fire_given_c, class_priors = compute_conditional_and_priors(
-        model, x_pmi, y_pmi, num_classes, chunk_size, device
-    )
-    marginal_rate = compute_marginal_firing_rate(p_fire_given_c, class_priors)
-    pmi = compute_pmi(p_fire_given_c, marginal_rate)
-    info = normalize_pmi_to_unit_interval(
-        pmi, upper_percentile=pmi_upper_percentile
-    )  # [d, C]
+        p_fire_given_c, class_priors = compute_conditional_and_priors(
+            model, x_pmi, y_pmi, num_classes, chunk_size, device
+        )
+        marginal_rate = compute_marginal_firing_rate(p_fire_given_c, class_priors)
+        pmi = compute_pmi(p_fire_given_c, marginal_rate)
+        info = normalize_pmi_to_unit_interval(
+            pmi, upper_percentile=pmi_upper_percentile
+        )  # [d, C]
 
-    ref_scale = compute_activation_reference_scale(
-        model, x_pmi, chunk_size, device, percentile=activation_scale_percentile
-    )  # [d]
+        ref_scale = compute_activation_reference_scale(
+            model, x_pmi, chunk_size, device, percentile=activation_scale_percentile
+        )  # [d]
 
     # ------------------------------------------------------------
     # Train and freeze the independent probe
@@ -665,6 +753,7 @@ def main(
             edit_strength_scale,
             chunk_size,
             device,
+            use_native_activation_strength=no_empirical,
         )
         shuffled_result = graded_edit_and_probe(
             model,
@@ -677,6 +766,7 @@ def main(
             edit_strength_scale,
             chunk_size,
             device,
+            use_native_activation_strength=no_empirical,
         )
 
         results[c] = {
@@ -708,6 +798,7 @@ def main(
         "architecture": architecture,
         "num_target_classes": len(results),
         "edit_strength_scale": edit_strength_scale,
+        "no_empirical": no_empirical,
         "pmi_upper_percentile": pmi_upper_percentile,
         "activation_scale_percentile": activation_scale_percentile,
         "aggregate": aggregate,
@@ -741,7 +832,19 @@ def cli():
         "--pmi-activations-path",
         default=None,
         help="Optional separate split for estimating PMI(i,c) and per-feature activation "
-        "reference scale. Defaults to reusing --train-activations-path if not given.",
+        "reference scale. Defaults to reusing --train-activations-path if not given. "
+        "Ignored when --no-empirical is set.",
+    )
+    parser.add_argument(
+        "--no-empirical",
+        action="store_true",
+        help="For class-aligned SAEs only (is_class_aligned(model)): skip the empirical "
+        "PMI and activation-reference-scale estimation pass entirely, and instead build "
+        "the graded edit purely from information the model already carries -- the "
+        "feature-class affinity matrix M (model.calculate_M(), standing in for PMI) and "
+        "the model's own native soft Top-K selection weights per sample (standing in for "
+        "the empirically-normalized activation strength). Raises if the loaded "
+        "architecture is not class-aligned.",
     )
     parser.add_argument("--target-classes", type=int, nargs="+", default=None)
     parser.add_argument("--num-random-target-classes", type=int, default=20)
@@ -774,6 +877,7 @@ def cli():
         train_activations_path=args.train_activations_path,
         test_activations_path=args.test_activations_path,
         pmi_activations_path=args.pmi_activations_path,
+        no_empirical=args.no_empirical,
         target_classes=args.target_classes,
         num_random_target_classes=args.num_random_target_classes,
         edit_strength_scale=args.edit_strength_scale,

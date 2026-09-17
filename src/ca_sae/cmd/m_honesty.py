@@ -9,6 +9,7 @@ from ca_sae.dataset import ActivationsDataset
 from ca_sae.eval.matrix_honesty import calculate_matrix_honesty
 from ca_sae.eval.posthoc_M import build_posthoc_M, compute_empirical_matrix
 from ca_sae.sae.ca_sae import ClassAlignedSAE
+from ca_sae.sae.ca_sae_no_mlp import ClassAlignedSAE_NO_MLP
 
 
 @torch.inference_mode()
@@ -21,6 +22,7 @@ def main(
     num_workers: int = 4,
     device: str | None = None,
     max_examples: int | None = None,
+    no_mlp: bool = False,
 ):
     """
     Evaluate the honesty of the learned feature-class affinity matrix M.
@@ -47,7 +49,7 @@ def main(
     # Load model
     # ------------------------------------------------------------------
 
-    model = ClassAlignedSAE.from_pretrained(
+    model = (ClassAlignedSAE if not no_mlp else ClassAlignedSAE_NO_MLP).from_pretrained(
         checkpoint_path,
         device=device,
     )
@@ -260,6 +262,10 @@ def cli():
         help="Optionally evaluate only the first N examples.",
     )
 
+    parser.add_argument(
+        "--no-mlp", action="store_true", help="Use for ablation without MLP"
+    )
+
     args = parser.parse_args()
 
     main(
@@ -271,6 +277,7 @@ def cli():
         num_workers=args.num_workers,
         device=args.device,
         max_examples=args.max_examples,
+        no_mlp=args.no_mlp,
     )
 
 
