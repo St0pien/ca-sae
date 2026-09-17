@@ -59,6 +59,12 @@ from tqdm import tqdm
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
+from ca_sae.eval.pmi import (
+    compute_conditional_and_priors,
+    compute_marginal_firing_rate,
+    compute_pmi,
+    normalize_pmi_to_unit_interval,
+)
 
 try:
     from scipy.stats import pearsonr, wilcoxon
@@ -86,94 +92,9 @@ def load_all_activations(activations_path: str, batch_size: int, num_workers: in
 
 
 # ======================================================================
-# Empirical PMI(i, c) -- same construction as the standalone PMI eval
-# script. Duplicated here (rather than imported) only for
-# self-containedness; if this lives in the same package as that
-# script, prefer importing compute_firing_indicator /
-# compute_conditional_and_priors / compute_marginal_firing_rate /
-# compute_pmi from there instead of maintaining two copies.
+# Empirical PMI(i, c) -- shared with the standalone PMI eval script;
+# see ca_sae.eval.pmi.
 # ======================================================================
-
-
-@torch.inference_mode()
-def compute_pmi_stats_streaming(
-    model,
-    x_all: torch.Tensor,
-    labels_all: torch.Tensor,
-    num_classes: int,
-    chunk_size: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Streaming replacement for compute_firing_indicator + compute_conditional_and_priors.
-
-    The original two-step version materializes a dense [N, d] bool
-    tensor (fired) and then a [N, d] float copy of it (fired_f) before
-    ever reducing anything -- for a training-sized activation set
-    (N ~ 1M+, d ~ 4096) that's tens of GB held at once for no reason,
-    since the only thing ever needed downstream is a [d, num_classes]
-    sum. This version accumulates fire_count[d, num_classes] and
-    class_count[num_classes] batch by batch, so peak memory is
-    O(d * num_classes + chunk_size * d) instead of O(N * d).
-    """
-    d = model.dict_size
-    fire_count = torch.zeros(d, num_classes)
-    class_count = torch.zeros(num_classes)
-
-    for start in tqdm(range(0, len(x_all), chunk_size), desc="Streaming PMI stats"):
-        end = start + chunk_size
-        x_batch = x_all[start:end].to(device)
-        labels_batch = labels_all[start:end].to(device)
-
-        z = model.encode(x_batch)
-        fired = (z > 0).float()  # [B, d], one chunk at a time -- never the full N
-
-        onehot = torch.zeros(len(labels_batch), num_classes, device=device)
-        onehot.scatter_(1, labels_batch.unsqueeze(1), 1.0)
-
-        fire_count += (fired.T @ onehot).cpu()
-        class_count += onehot.sum(dim=0).cpu()
-
-    p_fire_given_c = fire_count / class_count.clamp(min=1).unsqueeze(0)
-    class_priors = class_count / class_count.sum().clamp(min=1)
-    return p_fire_given_c, class_priors
-
-
-def compute_marginal_firing_rate(
-    p_fire_given_c: torch.Tensor, class_priors: torch.Tensor
-) -> torch.Tensor:
-    return p_fire_given_c @ class_priors
-
-
-def compute_pmi(
-    p_fire_given_c: torch.Tensor, marginal_rate: torch.Tensor, eps: float = 1e-8
-) -> torch.Tensor:
-    p_cond = p_fire_given_c.clamp(min=eps)
-    p_marg = marginal_rate.clamp(min=eps).unsqueeze(1)
-    return torch.log(p_cond / p_marg)
-
-
-def normalize_pmi_to_unit_interval(
-    pmi: torch.Tensor, upper_percentile: float = 99.0
-) -> torch.Tensor:
-    """
-    ReLU(PMI), then scaled into [0, 1] using a single GLOBAL upper
-    percentile as the reference (not a per-class or per-feature
-    min-max). Using a global reference means one exceptionally
-    class-specific feature can't compress every other feature's
-    informativeness toward zero on a per-column normalization, and it
-    keeps informativeness values comparable across classes and across
-    architectures at different sparsity levels.
-
-    Only positive PMI counts as "evidence for c" -- negative or zero
-    PMI (the feature fires no more than its own baseline rate for c,
-    or actively less) is mapped to exactly 0. Ablating harder because a
-    feature is anti-correlated with c would work against the stated
-    goal, not for it.
-    """
-    pos = pmi.clamp(min=0)
-    ref = torch.quantile(pos.flatten(), upper_percentile / 100.0).clamp(min=1e-6)
-    return (pos / ref).clamp(max=1.0)
 
 
 def compute_activation_reference_scale(
@@ -664,7 +585,7 @@ def main(
         )
         x_pmi, y_pmi = x_train, y_train
 
-    p_fire_given_c, class_priors = compute_pmi_stats_streaming(
+    p_fire_given_c, class_priors = compute_conditional_and_priors(
         model, x_pmi, y_pmi, num_classes, chunk_size, device
     )
     marginal_rate = compute_marginal_firing_rate(p_fire_given_c, class_priors)

@@ -54,6 +54,12 @@ from tqdm import tqdm
 
 from ca_sae.const import SUPPORTED_ARCHITECTURES
 from ca_sae.dataset import ActivationsDataset
+from ca_sae.eval.pmi import (
+    compute_conditional_and_priors,
+    compute_marginal_firing_rate,
+    compute_pmi,
+    normalized_pmi,
+)
 from ca_sae.sae.ca_sae import ClassAlignedSAE
 from ca_sae.sae.core import is_class_aligned
 
@@ -80,130 +86,6 @@ def load_all_activations(activations_path: str, batch_size: int, num_workers: in
         xs.append(x.float())
         ys.append(y)
     return torch.cat(xs, dim=0), torch.cat(ys, dim=0).long()
-
-
-# ======================================================================
-# Empirical firing statistics
-# ======================================================================
-
-
-@torch.inference_mode()
-def compute_firing_indicator(
-    model, x_all: torch.Tensor, chunk_size: int, device: torch.device
-) -> torch.Tensor:
-    """
-    Returns a binary [N, d] tensor: whether each feature fired (was
-    part of the top-k selection / nonzero code) for each sample.
-
-    We use `z > 0` rather than a magnitude threshold because the docs
-    for this codebase's SAE API state the code is already top-k-gated,
-    so nonzero entries ARE the selection -- consistent with the "use
-    selection mass, not activation magnitude" convention used
-    elsewhere in this codebase (see SoftSAE-CA's use of p over z).
-    """
-    d = model.dict_size
-    fired = torch.zeros(len(x_all), d, dtype=torch.bool)
-    for start in tqdm(
-        range(0, len(x_all), chunk_size), desc="Encoding for firing statistics"
-    ):
-        end = start + chunk_size
-        x_batch = x_all[start:end].to(device)
-        z = model.encode(x_batch)
-        fired[start:end] = (z > 0).cpu()
-    return fired
-
-
-def compute_conditional_and_priors(
-    fired: torch.Tensor, labels: torch.Tensor, num_classes: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    fired: [N, d] bool
-    labels: [N]
-
-    Returns:
-      p_fire_given_c: [d, num_classes], P(fire_i | c)
-      class_priors:   [num_classes], P(c) (empirical class frequency)
-    """
-    d = fired.shape[1]
-    p_fire_given_c = torch.zeros(d, num_classes)
-    class_priors = torch.zeros(num_classes)
-
-    fired_f = fired.float()
-    for c in range(num_classes):
-        mask = labels == c
-        n_c = mask.sum().item()
-        class_priors[c] = n_c / len(labels)
-        if n_c > 0:
-            p_fire_given_c[:, c] = fired_f[mask].mean(dim=0)
-        # if a class has zero samples in this split, its column stays 0;
-        # it will simply never be selected as anyone's most-informative
-        # class and contributes 0 prior mass to the marginal below.
-    return p_fire_given_c, class_priors
-
-
-def compute_marginal_firing_rate(
-    p_fire_given_c: torch.Tensor, class_priors: torch.Tensor
-) -> torch.Tensor:
-    """
-    P(fire_i) = sum_c P(fire_i | c) * P(c)
-
-    This is the class-prior-weighted average of each feature's row in
-    p_fire_given_c -- i.e. literally "how often does this feature fire,
-    ignoring class." Note this can also be estimated directly by
-    fired.float().mean(dim=0) on the unlabelled data; both should agree
-    up to sampling noise, and computing it this way keeps everything
-    downstream expressible in terms of the same two tensors.
-    """
-    return p_fire_given_c @ class_priors
-
-
-# ======================================================================
-# PMI
-# ======================================================================
-
-
-def compute_pmi(
-    p_fire_given_c: torch.Tensor,
-    marginal_rate: torch.Tensor,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """
-    PMI(i, c) = log( P(fire_i | c) / P(fire_i) )
-
-    Returns [d, num_classes]. Features/classes with essentially zero
-    conditional or marginal firing rate get clamped via eps rather than
-    producing -inf/nan; these entries carry no real evidence either way
-    and are best excluded from summaries via the firing-rate filters
-    below rather than trusted as extreme PMI values.
-    """
-    p_cond = p_fire_given_c.clamp(min=eps)
-    p_marg = marginal_rate.clamp(min=eps).unsqueeze(1)
-    return torch.log(p_cond / p_marg)
-
-
-def normalized_pmi(
-    pmi: torch.Tensor,
-    p_fire_given_c: torch.Tensor,
-    class_priors: torch.Tensor,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """
-    NPMI(i, c) = PMI(i, c) / -log(P(fire_i, c))
-
-    Plain PMI is unbounded and biased toward rare events (a feature
-    that fires on a single sample of a single class gets a huge PMI
-    from noise alone). Normalizing into [-1, 1] makes magnitudes
-    comparable across features with very different firing rates, which
-    matters when comparing summaries *across architectures* that may
-    have very different overall sparsity levels.
-
-    P(fire_i, c) = P(fire_i | c) * P(c) -- the class prior multiplication
-    is required here; omitting it (as an earlier version of this function
-    did) silently returns values far outside [-1, 1], since P(fire_i | c)
-    alone is much larger than the true joint whenever num_classes is large.
-    """
-    p_joint = (p_fire_given_c * class_priors.unsqueeze(0)).clamp(min=eps)
-    return pmi / (-torch.log(p_joint))
 
 
 # ======================================================================
@@ -423,9 +305,8 @@ def main(
         f"num_classes={num_classes}, num_examples={len(x_all)}, dict_size={model.dict_size}"
     )
 
-    fired = compute_firing_indicator(model, x_all, chunk_size, device)
     p_fire_given_c, class_priors = compute_conditional_and_priors(
-        fired, labels_all, num_classes
+        model, x_all, labels_all, num_classes, chunk_size, device
     )
     marginal_rate = compute_marginal_firing_rate(p_fire_given_c, class_priors)
     pmi = compute_pmi(p_fire_given_c, marginal_rate)
