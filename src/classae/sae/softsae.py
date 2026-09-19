@@ -7,8 +7,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from lapsum.topk import soft_topk
 
-from ca_sae.sae.config import SAEConfig
-from ca_sae.sae.core import (
+from classae.sae.config import SAEConfig
+from classae.sae.core import (
     Dictionary,
     SAETrainer,
     geometric_median,

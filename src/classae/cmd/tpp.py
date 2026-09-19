@@ -58,16 +58,16 @@ from lapsum.topk import soft_topk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ca_sae.const import SUPPORTED_ARCHITECTURES, is_class_aligned
-from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.pmi import (
+from classae.const import SUPPORTED_ARCHITECTURES, is_class_aligned
+from classae.dataset import ActivationsDataset
+from classae.eval.pmi import (
     compute_conditional_and_priors,
     compute_marginal_firing_rate,
     compute_pmi,
     normalize_pmi_to_unit_interval,
 )
-from ca_sae.sae.ca_sae import ClassAlignedSAE
-from ca_sae.sae.ca_sae_no_mlp import ClassAlignedSAE_NO_MLP
+from classae.sae.classae import ClasSAE
+from classae.sae.classae_no_mlp import ClasSAE_NO_MLP
 
 try:
     from scipy.stats import pearsonr, wilcoxon
@@ -166,12 +166,12 @@ def compute_native_selection_weights(
     `is_class_aligned`), since their `encode()` signatures differ in
     how the soft weights are (or aren't) exposed.
     """
-    if isinstance(model, ClassAlignedSAE):
+    if isinstance(model, ClasSAE):
         _, _, _, weights, _, _ = model.encode(
             x_batch, return_active=True, use_hard_topk=False
         )
         return weights
-    elif isinstance(model, ClassAlignedSAE_NO_MLP):
+    elif isinstance(model, ClasSAE_NO_MLP):
         f, _, post_relu_acts = model.encode(
             x_batch, return_active=True, use_threshold=False
         )

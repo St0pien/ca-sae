@@ -15,3 +15,5 @@ activations/
 checkpoints/
 wandb/
 hf_cache
+outputs
+experiment_results/empirical_matrices

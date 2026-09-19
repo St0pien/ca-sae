@@ -1,4 +1,4 @@
-_target_: ca_sae.sae.ca_sae_abl.ClassAlignedSAE_NO_MLP_Config
+_target_: classae.sae.classae_no_mlp.ClasSAE_NO_MLP_Config
 activation_dim: 768
 dict_size: 16384
 k: 380

@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ca_sae.sae.config import SAEConfig
-from ca_sae.sae.core import geometric_median
+from classae.sae.config import SAEConfig
+from classae.sae.core import geometric_median
 
 from .core import (
     Dictionary,

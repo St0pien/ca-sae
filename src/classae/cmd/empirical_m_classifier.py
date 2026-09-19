@@ -6,9 +6,9 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ca_sae.const import SUPPORTED_ARCHITECTURES, is_class_aligned
-from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.posthoc_M import build_posthoc_M
+from classae.const import SUPPORTED_ARCHITECTURES, is_class_aligned
+from classae.dataset import ActivationsDataset
+from classae.eval.posthoc_M import build_posthoc_M
 
 
 @torch.inference_mode()

@@ -5,7 +5,7 @@ import einops
 import torch
 import torch.nn as nn
 
-from ca_sae.sae.config import SAEConfig
+from classae.sae.config import SAEConfig
 
 
 class Dictionary(ABC, nn.Module):

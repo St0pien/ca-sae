@@ -8,23 +8,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from lapsum.topk import soft_topk
 
-from ca_sae.sae.config import SAEConfig
-from ca_sae.sae.core import (
+from classae.sae.config import SAEConfig
+from classae.sae.core import (
     Dictionary,
     SAETrainer,
     geometric_median,
     get_lr_schedule,
     remove_gradient_parallel_to_decoder_directions,
     set_decoder_norm_to_unit_norm,
+    topk_per_row,
 )
 
 
-class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
+class ClasSAE(Dictionary, nn.Module):
     def __init__(
         self,
         activation_dim: int,
         dict_size: int,
-        k: int,
         num_classes: int,
         rho: int,
         alpha: float,
@@ -32,8 +32,6 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
         super().__init__()
         self.activation_dim = activation_dim
         self.dict_size = dict_size
-        self.register_buffer("k", torch.tensor(k, dtype=torch.int))
-        self.register_buffer("threshold", torch.tensor(-1.0, dtype=torch.float32))
         self.num_classes = num_classes
         self.rho = rho
 
@@ -61,6 +59,11 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
             torch.zeros((dict_size,), dtype=torch.float32)
         )
 
+    def estimate_k(self, x: torch.Tensor) -> torch.Tensor:
+        logit = self.k_estimator((x - self.b_dec) / self.norm_factor).squeeze(-1)
+        k_hat = logit * self.dict_size
+        return torch.clamp(k_hat, min=1, max=self.dict_size)
+
     def calculate_M(self):
         Ktot = float(self.rho * self.dict_size)
 
@@ -72,32 +75,37 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
 
         return M
 
-    def encode(self, x: torch.Tensor, return_active: bool = False, use_threshold=True):
+    def encode(self, x: torch.Tensor, return_active: bool = False, use_hard_topk=True):
         post_relu_feat_acts = F.relu(self.encoder(x - self.b_dec))
 
-        if use_threshold:
-            encoded_acts_BF = post_relu_feat_acts * (
-                post_relu_feat_acts > self.threshold
-            )
+        if use_hard_topk:
+            with torch.no_grad():
+                k_hat = self.estimate_k(x).long()
+                encoded_acts = topk_per_row(post_relu_feat_acts, k_hat)
         else:
-            # Flatten and perform batch top-k
-            flattened_acts = post_relu_feat_acts.flatten()
-            post_topk = flattened_acts.topk(self.k * x.size(0), sorted=False, dim=-1)
+            k_hat = self.estimate_k(x)
+            weights = soft_topk(
+                post_relu_feat_acts, k_hat.view(k_hat.shape[0], 1), self.alpha.clone()
+            )
+            encoded_acts = post_relu_feat_acts * weights
 
-            encoded_acts_BF = (
-                torch.zeros_like(post_relu_feat_acts.flatten())
-                .scatter_(-1, post_topk.indices, post_topk.values)
-                .reshape(post_relu_feat_acts.shape)
+            weights_for_agreement = soft_topk(
+                post_relu_feat_acts,
+                k_hat.detach().view(k_hat.shape[0], 1),
+                self.alpha.clone(),
             )
 
         if return_active:
             return (
-                encoded_acts_BF,
-                encoded_acts_BF.sum(0) > 0,
+                encoded_acts,
+                encoded_acts.sum(0) > 0,
                 post_relu_feat_acts,
+                weights,
+                weights_for_agreement,
+                k_hat,
             )
         else:
-            return encoded_acts_BF
+            return encoded_acts
 
     def decode(self, f: torch.Tensor) -> torch.Tensor:
         return self.decoder(f) + self.b_dec
@@ -117,7 +125,7 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
         self.norm_factor.fill_(scale)
 
     @classmethod
-    def from_pretrained(cls, path, device=None, **kwargs) -> "ClassAlignedSAE_NO_MLP":
+    def from_pretrained(cls, path, device=None, **kwargs) -> "ClasSAE":
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         state_dict = torch.load(
@@ -152,12 +160,9 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
             json_config = json.load(f_config)
             rho = json_config["sae"]["rho"]
 
-        k = state_dict["k"].item()
-
         model = cls(
             activation_dim=activation_dim,
             dict_size=dict_size,
-            k=k,
             num_classes=num_classes,
             rho=rho,
             alpha=alpha,
@@ -171,8 +176,8 @@ class ClassAlignedSAE_NO_MLP(Dictionary, nn.Module):
 
 
 @dataclass
-class ClassAlignedSAE_NO_MLP_Config(SAEConfig):
-    k: int = 64
+class ClasSAEConfig(SAEConfig):
+    k_loss_weight: float = 1.0
     soft_topk_alpha: float = 0.001
     alpha_anneal_steps: Optional[int] = None
     num_classes: int = 1000
@@ -183,22 +188,20 @@ class ClassAlignedSAE_NO_MLP_Config(SAEConfig):
     tau_anneal_steps: Optional[int] = None
 
 
-class ClassAlignedSAE_NO_MLP_Trainer(SAETrainer):
-    ae: ClassAlignedSAE_NO_MLP
+class ClasSAETrainer(SAETrainer):
+    ae: ClasSAE
 
-    def __init__(self, steps, cfg: ClassAlignedSAE_NO_MLP_Config):
+    def __init__(self, steps, cfg: ClasSAEConfig):
         super().__init__(steps, cfg)
         self.steps = steps
         self.steps = steps
         self.decay_start = cfg.decay_start
         self.warmup_steps = cfg.warmup_steps
         self.k_anneal_steps = cfg.k_anneal_steps
+        self.k_loss_weight = cfg.k_loss_weight
         self.agreement_loss_weight = cfg.agreement_loss_weight
         self.soft_topk_alpha = cfg.soft_topk_alpha
         self.alpha_anneal_steps = cfg.alpha_anneal_steps
-
-        self.threshold_beta = cfg.threshold_beta
-        self.threshold_start_step = cfg.threshold_start_step
 
         self.agreement_tau = cfg.agreement_tau
         self.tau_anneal_start = cfg.tau_anneal_start
@@ -206,10 +209,9 @@ class ClassAlignedSAE_NO_MLP_Trainer(SAETrainer):
 
         self.active_tau = cfg.agreement_tau
 
-        self.ae = ClassAlignedSAE_NO_MLP(
+        self.ae = ClasSAE(
             cfg.activation_dim,
             cfg.dict_size,
-            cfg.k,
             cfg.num_classes,
             cfg.rho,
             cfg.soft_topk_alpha,
@@ -321,23 +323,6 @@ class ClassAlignedSAE_NO_MLP_Trainer(SAETrainer):
         )
         self.active_tau = annealed_value
 
-    def update_threshold(self, f: torch.Tensor):
-        device_type = "cuda" if f.is_cuda else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False), torch.no_grad():
-            active = f[f > 0]
-
-            if active.size(0) == 0:
-                min_activation = torch.tensor([0.0], dtype=torch.float)
-            else:
-                min_activation = active.min().detach().to(dtype=torch.float32)
-
-            if self.ae.threshold < 0:
-                self.ae.threshold = min_activation
-            else:
-                self.ae.threshold = (self.threshold_beta * self.ae.threshold) + (
-                    (1 - self.threshold_beta) * min_activation
-                )
-
     def get_auxiliary_loss(
         self, residual_BD: torch.Tensor, post_relu_acts_BF: torch.Tensor
     ):
@@ -384,6 +369,9 @@ class ClassAlignedSAE_NO_MLP_Trainer(SAETrainer):
             self.pre_norm_auxk_loss = -1
             return torch.tensor(0, dtype=residual_BD.dtype, device=residual_BD.device)
 
+    def get_k_loss(self, estimated_k: torch.Tensor):
+        return (estimated_k.mean() / self.ae.dict_size).square()
+
     def get_agreement_loss(
         self, p: torch.Tensor, k_hat: torch.Tensor, labels: torch.Tensor
     ):
@@ -410,14 +398,20 @@ class ClassAlignedSAE_NO_MLP_Trainer(SAETrainer):
 
     def loss(self, x, y, step=None, logging=False):
         (
-            f,
+            f_soft,
             active_indices_F,
             post_relu_acts,
-        ) = self.ae.encode(x, return_active=True, use_threshold=False)
+            weights,
+            weights_for_agreement,
+            k_hat,
+        ) = self.ae.encode(x, return_active=True, use_hard_topk=False)
 
-        self.update_threshold(f)
+        with torch.no_grad():
+            f_hard = self.ae.encode(x, use_hard_topk=True)
 
-        x_hat = self.ae.decode(f)
+        f_combined = f_hard + (f_soft - f_soft.detach())
+
+        x_hat = self.ae.decode(f_combined)
 
         e = x - x_hat
 
@@ -427,21 +421,23 @@ class ClassAlignedSAE_NO_MLP_Trainer(SAETrainer):
         self.num_tokens_since_fired += num_tokens_in_step
         self.num_tokens_since_fired[did_fire] = 0
 
+        self.avg_k = k_hat.mean(dtype=torch.float32)
+        self.min_k = k_hat.min()
+        self.max_k = k_hat.max()
         self.ae_soft_topk_alpha = self.ae.alpha.clone()
         self.lr_log = self.scheduler.get_last_lr()[0]
 
         l2_loss = e.pow(2).sum(dim=-1).mean()
         auxk_loss = self.get_auxiliary_loss(e.detach(), post_relu_acts)
+        k_loss = self.get_k_loss(k_hat)
+        self.k_loss = k_loss
 
-        k_hat_sim = (f > 0).sum(dim=1).clamp_min(1).float()
-        soft_weights = soft_topk(
-            post_relu_acts, k_hat_sim.unsqueeze(1), self.ae.alpha.clone()
-        )
-        agreement_loss = self.get_agreement_loss(soft_weights, k_hat_sim, y)
+        agreement_loss = self.get_agreement_loss(weights_for_agreement, k_hat, y)
         self.agreement_loss = agreement_loss
 
         loss = (
             l2_loss
+            + self.k_loss_weight * k_loss
             + self.auxk_alpha * auxk_loss
             + self.agreement_loss_weight * agreement_loss
         )
@@ -452,7 +448,7 @@ class ClassAlignedSAE_NO_MLP_Trainer(SAETrainer):
             return namedtuple("LossLog", ["x", "x_hat", "f", "losses"])(
                 x,
                 x_hat,
-                f,
+                f_hard,
                 {
                     "l2_loss": l2_loss.item(),
                     "auxk_loss": auxk_loss.item(),

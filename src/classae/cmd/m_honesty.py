@@ -5,11 +5,11 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.matrix_honesty import calculate_matrix_honesty
-from ca_sae.eval.posthoc_M import build_posthoc_M, compute_empirical_matrix
-from ca_sae.sae.ca_sae import ClassAlignedSAE
-from ca_sae.sae.ca_sae_no_mlp import ClassAlignedSAE_NO_MLP
+from classae.dataset import ActivationsDataset
+from classae.eval.matrix_honesty import calculate_matrix_honesty
+from classae.eval.posthoc_M import build_posthoc_M, compute_empirical_matrix
+from classae.sae.classae import ClasSAE
+from classae.sae.classae_no_mlp import ClasSAE_NO_MLP
 
 
 @torch.inference_mode()
@@ -49,7 +49,7 @@ def main(
     # Load model
     # ------------------------------------------------------------------
 
-    model = (ClassAlignedSAE if not no_mlp else ClassAlignedSAE_NO_MLP).from_pretrained(
+    model = (ClasSAE if not no_mlp else ClasSAE_NO_MLP).from_pretrained(
         checkpoint_path,
         device=device,
     )
@@ -83,7 +83,7 @@ def main(
     # ------------------------------------------------------------------
     # Construct learned M.
     #
-    # This mirrors ClassAlignedSAETrainer.get_agreement_loss().
+    # This mirrors ClasSAETrainer.get_agreement_loss().
     # ------------------------------------------------------------------
 
     test_posthoc_M, test_posthoc_k = build_posthoc_M(test_A, model.rho)
@@ -212,7 +212,7 @@ def cli():
         "--checkpoint-path",
         type=str,
         required=True,
-        help="Path to the trained ClassAlignedSAE checkpoint.",
+        help="Path to the trained ClasSAE checkpoint.",
     )
 
     parser.add_argument(

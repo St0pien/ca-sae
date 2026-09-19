@@ -30,7 +30,7 @@ informativeness summaries so different SAE architectures (or checkpoints
 of the same architecture) can be compared on a common scale.
 
 Optionally, if the model exposes a trained feature-class table (e.g.
-ClassAlignedSAE.calculate_M()), this script also computes a PMI *proxy*
+ClasSAE.calculate_M()), this script also computes a PMI *proxy*
 directly from the trained parameters -- no data pass over classes beyond
 a single label-free marginal-rate estimate -- and reports how well it
 tracks the fully empirical PMI. This is a calibration check on the
@@ -40,7 +40,7 @@ Model API assumed (same as the other eval scripts in this codebase):
   - `model.encode(x)`  -> sparse code z, [B, d], already top-k-gated
   - `model.dict_size`  -> d
   - (optional) `model.calculate_M()` -> [d, C] trained claim matrix,
-    for architectures that expose one (e.g. ClassAlignedSAE)
+    for architectures that expose one (e.g. ClasSAE)
 """
 
 import argparse
@@ -52,16 +52,16 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ca_sae.const import SUPPORTED_ARCHITECTURES
-from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.pmi import (
+from classae.const import SUPPORTED_ARCHITECTURES
+from classae.dataset import ActivationsDataset
+from classae.eval.pmi import (
     compute_conditional_and_priors,
     compute_marginal_firing_rate,
     compute_pmi,
     normalized_pmi,
 )
-from ca_sae.sae.ca_sae import ClassAlignedSAE
-from ca_sae.sae.core import is_class_aligned
+from classae.sae.classae import ClasSAE
+from classae.sae.core import is_class_aligned
 
 try:
     from scipy.stats import pearsonr, spearmanr
@@ -200,7 +200,7 @@ def pmi_proxy_from_trained_M(
 ) -> torch.Tensor:
     """
     Approximates PMI(i, c) from a trained claim matrix M (e.g.
-    ClassAlignedSAE's M, before hardening if possible -- see caveat
+    ClasSAE's M, before hardening if possible -- see caveat
     below) plus a single label-free marginal firing-rate estimate,
     without re-estimating the full empirical conditional P(fire_i | c).
 
@@ -331,7 +331,7 @@ def main(
     if check_trained_M:
         if not is_class_aligned(model):
             print(
-                "\n[note] --check-trained-M was set but model is not a ClassAlignedSAE "
+                "\n[note] --check-trained-M was set but model is not a ClasSAE "
                 "(no calculate_M() available); skipping calibration check."
             )
         else:
@@ -436,7 +436,7 @@ def cli():
     parser.add_argument(
         "--check-trained-M",
         action="store_true",
-        help="If the model exposes calculate_M() (e.g. ClassAlignedSAE), also "
+        help="If the model exposes calculate_M() (e.g. ClasSAE), also "
         "compute a parameter-only PMI proxy and correlate it against the "
         "empirical PMI, as a calibration check on the trained table.",
     )

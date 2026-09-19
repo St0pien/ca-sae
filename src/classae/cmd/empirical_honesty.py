@@ -5,11 +5,11 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from ca_sae.const import SUPPORTED_ARCHITECTURES
-from ca_sae.dataset import ActivationsDataset
-from ca_sae.eval.matrix_honesty import calculate_matrix_honesty
-from ca_sae.eval.posthoc_M import build_posthoc_M, compute_empirical_matrix
-from ca_sae.sae.core import Dictionary
+from classae.const import SUPPORTED_ARCHITECTURES
+from classae.dataset import ActivationsDataset
+from classae.eval.matrix_honesty import calculate_matrix_honesty
+from classae.eval.posthoc_M import build_posthoc_M, compute_empirical_matrix
+from classae.sae.core import Dictionary
 
 
 def _compute_matrix(

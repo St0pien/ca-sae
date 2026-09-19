@@ -15,26 +15,27 @@ from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
 import wandb
-from ca_sae.const import is_class_aligned
-from ca_sae.dataset import ActivationsDataset
-from ca_sae.sae.batch_topk import BatchTopKSAEConfig, BatchTopKTrainer
-from ca_sae.sae.ca_sae import ClassAlignedSAEConfig, ClassAlignedSAETrainer
-from ca_sae.sae.ca_sae_no_mlp import (
-    ClassAlignedSAE_NO_MLP_Config,
-    ClassAlignedSAE_NO_MLP_Trainer,
+from classae.const import is_class_aligned
+from classae.dataset import ActivationsDataset
+from classae.sae.batch_topk import BatchTopKSAEConfig, BatchTopKTrainer
+from classae.sae.classae import ClasSAEConfig, ClasSAETrainer
+from classae.sae.classae_no_mlp import (
+    ClasSAE_NO_MLP_Config,
+    ClasSAE_NO_MLP_Trainer,
 )
-from ca_sae.sae.config import (
+from classae.sae.classae_no_topk import ClasSAE_NO_TOPK_Config, ClasSAE_NO_TOPK_Trainer
+from classae.sae.config import (
     AUTOCAST_DTYPE,
     SAEConfig,
     TrainConfig,
 )
-from ca_sae.sae.core import SAETrainer
-from ca_sae.sae.matryoshka_batch_topk import (
+from classae.sae.core import SAETrainer
+from classae.sae.matryoshka_batch_topk import (
     MatryoshkaBatchTopKSAEConfig,
     MatryoshkaBatchTopKTrainer,
 )
-from ca_sae.sae.softsae import SoftSAEConfig, SoftSAETrainer
-from ca_sae.sae.top_afa import TopAFASAEConfig, TopAFATrainer
+from classae.sae.softsae import SoftSAEConfig, SoftSAETrainer
+from classae.sae.top_afa import TopAFASAEConfig, TopAFATrainer
 
 
 class ChunkBatchSampler(Sampler):
@@ -109,10 +110,12 @@ def make_sae_trainer(steps: int, cfg: SAEConfig) -> SAETrainer:
         return TopAFATrainer(steps, cfg)
     elif isinstance(cfg, SoftSAEConfig):
         return SoftSAETrainer(steps, cfg)
-    elif isinstance(cfg, ClassAlignedSAE_NO_MLP_Config):
-        return ClassAlignedSAE_NO_MLP_Trainer(steps, cfg)
-    elif isinstance(cfg, ClassAlignedSAEConfig):
-        return ClassAlignedSAETrainer(steps, cfg)
+    elif isinstance(cfg, ClasSAE_NO_MLP_Config):
+        return ClasSAE_NO_MLP_Trainer(steps, cfg)
+    elif isinstance(cfg, ClasSAE_NO_TOPK_Config):
+        return ClasSAE_NO_TOPK_Trainer(steps, cfg)
+    elif isinstance(cfg, ClasSAEConfig):
+        return ClasSAETrainer(steps, cfg)
     else:
         raise ValueError(f"Unkown sae config: {cfg.__class__.__name__}")
 

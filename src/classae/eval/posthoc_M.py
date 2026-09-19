@@ -2,7 +2,7 @@ import torch
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
-from ca_sae.sae.core import Dictionary
+from classae.sae.core import Dictionary
 
 
 def compute_empirical_matrix(

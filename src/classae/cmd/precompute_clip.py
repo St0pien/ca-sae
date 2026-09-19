@@ -8,7 +8,7 @@ import torch
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
-from ca_sae.dataset import ImageNetDataset
+from classae.dataset import ImageNetDataset
 
 
 def main(

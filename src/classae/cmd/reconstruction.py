@@ -7,9 +7,9 @@ import torch
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
-from ca_sae.const import SUPPORTED_ARCHITECTURES
-from ca_sae.dataset import ActivationsDataset
-from ca_sae.sae.core import Dictionary
+from classae.const import SUPPORTED_ARCHITECTURES
+from classae.dataset import ActivationsDataset
+from classae.sae.core import Dictionary
 
 
 @torch.no_grad()
@@ -78,7 +78,7 @@ def main(
 
 def cli():
     parser = argparse.ArgumentParser(
-        description="Evaluate reconstruction statistics of a ClassAlignedSAE."
+        description="Evaluate reconstruction statistics of a ClasSAE."
     )
 
     parser.add_argument(
@@ -94,7 +94,7 @@ def cli():
         "--checkpoint-path",
         type=str,
         required=True,
-        help="Path to the ClassAlignedSAE checkpoint directory.",
+        help="Path to the ClasSAE checkpoint directory.",
     )
 
     parser.add_argument(

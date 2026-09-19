@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoImageProcessor, AutoModel
 
-from ca_sae.dataset import ImageNetDataset
+from classae.dataset import ImageNetDataset
 
 
 def make_collate_fn(processor):

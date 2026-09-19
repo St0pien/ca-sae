@@ -3,7 +3,7 @@ defaults:
   - wandb: default
   - _self_
 
-_target_: ca_sae.sae.config.TrainConfig
+_target_: classae.sae.config.TrainConfig
 
 activations_path: activations/imagenet_train_L_14
 epochs: 50
@@ -15,7 +15,7 @@ normalize_activations: true
 seed: 0
 
 dataloader:
-  _target_: ca_sae.sae.config.DataLoaderConfig
+  _target_: classae.sae.config.DataLoaderConfig
   num_workers: 4
   batch_size: 4096
   prefetch_factor: 2

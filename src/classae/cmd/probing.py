@@ -7,8 +7,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ca_sae.const import SUPPORTED_ARCHITECTURES
-from ca_sae.dataset import ActivationsDataset
+from classae.const import SUPPORTED_ARCHITECTURES
+from classae.dataset import ActivationsDataset
 
 
 def topk_sparse(x: torch.Tensor, k: int) -> torch.Tensor:
