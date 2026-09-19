@@ -374,13 +374,14 @@ class ClasSAE_NO_TOPK_Trainer(SAETrainer):
         relaxation of L0 sparsity, replacing CA-SAE's k_loss entirely."""
         return f.norm(p=1, dim=-1).mean()
 
-    def get_agreement_loss(self, f: torch.Tensor, labels: torch.Tensor):
+    def get_agreement_loss(self, acts: torch.Tensor, labels: torch.Tensor):
         """Same contrastive form as CA-SAE's agreement loss, but the
         normalizer is now the realized L0 norm (count of active features
         per example, detached) rather than a predicted k_hat, since there
         is no k-estimator in this variant."""
-        l0 = (f > 0).sum(dim=-1).clamp(min=1).to(f.dtype)  # [B]
-        pi = f / l0.unsqueeze(-1).detach()  # [B, d]
+        l0 = (acts > 0).sum(dim=-1).clamp(min=1).to(acts.dtype)  # [B]
+        p = soft_topk(acts, l0.unsqueeze(1), self.ae.alpha.clone())
+        pi = p / l0.unsqueeze(-1).detach()  # [B, d]
 
         M = self.ae.calculate_M()  # [d, C]
 
@@ -420,7 +421,7 @@ class ClasSAE_NO_TOPK_Trainer(SAETrainer):
         l1_loss = self.get_l1_loss(f)
         self.l1_loss = l1_loss
 
-        agreement_loss = self.get_agreement_loss(f, y)
+        agreement_loss = self.get_agreement_loss(post_relu_acts, y)
         self.agreement_loss = agreement_loss
 
         loss = (
