@@ -8,4 +8,4 @@ agreement_loss_weight: 0.2
 dead_feature_threshold: 2_000_000
 agreement_tau: 1.0
 rho: 40
-l1_penalty: 0.03
+l1_penalty: 0.05

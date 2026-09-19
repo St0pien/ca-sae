@@ -199,6 +199,8 @@ def seed_worker(worker_id: int, base_seed: int) -> None:
 
 
 def main(cfg: TrainConfig):
+    torch.backends.cuda.matmul.fp32_precision = "tf32"
+    torch.backends.cudnn.fp32_precision = "tf32"
     seed_everything(cfg.seed)
 
     autocast_context = (

@@ -422,26 +422,42 @@ __global__ void derivative_components_jvp_kernel(
     at::PackedTensorAccessor32<T, 2, at::RestrictPtrTraits> scalar_prod,
     at::PackedTensorAccessor32<T, 2, at::RestrictPtrTraits> scalar_prod_input,
     at::PackedTensorAccessor32<T, 3, at::RestrictPtrTraits> grad, const T alpha) {
-    const int bs = blockIdx.y;
+    // Grid is (blocks_per_n, m, batch_size): one block-column per (bs, j)
+    // row. Every thread used to atomicAdd straight into sum[bs][j] /
+    // scalar_prod[bs][j] / scalar_prod_input[bs][j], so all dict_size
+    // threads assigned to a row serialized on the same 3 addresses. Reduce
+    // within the block first (same pattern as compute_a_sums_kernel above)
+    // so each block does exactly one atomicAdd per array instead of one
+    // per thread.
+    const int bs = blockIdx.z;
+    const int j = blockIdx.y;
     const int n = input.size(1);
-    const int m = output.size(1);
 
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (bs >= input.size(0) || j >= output.size(1)) return;
 
-    if (bs < input.size(0) && index < n * m) {
-        int l = index % n;
-        int j = index / n;
+    const T out_j = output[bs][j];
+    const int l = blockIdx.x * blockDim.x + threadIdx.x;
 
-        T value = pdfLap(output[bs][j] - input[bs][l], alpha);
+    T thread_sum = 0, thread_sp = 0, thread_spi = 0;
+    if (l < n) {
+        T value = pdfLap(out_j - input[bs][l], alpha);
         grad[bs][j][l] = value;
 
-        // Atomic addition to ensure thread safety for the sum array
-        atomicAdd(&sum[bs][j], value);
+        thread_sum = value;
+        thread_sp = value * v[bs][j][l];
+        thread_spi = value * input[bs][l];
+    }
 
-        T value1 = value * input[bs][l];
-        value *= v[bs][j][l];
-        atomicAdd(&scalar_prod[bs][j], value);
-        atomicAdd(&scalar_prod_input[bs][j], value1);
+    T block_sum = blockReduceSum(thread_sum);
+    __syncthreads(); // drain blockReduceSum's shared scratch before reuse
+    T block_sp = blockReduceSum(thread_sp);
+    __syncthreads();
+    T block_spi = blockReduceSum(thread_spi);
+
+    if (threadIdx.x == 0) {
+        atomicAdd(&sum[bs][j], block_sum);
+        atomicAdd(&scalar_prod[bs][j], block_sp);
+        atomicAdd(&scalar_prod_input[bs][j], block_spi);
     }
 }
 
@@ -468,28 +484,39 @@ __global__ void derivative_jvp_kernel(
     const at::PackedTensorAccessor32<T, 2, at::RestrictPtrTraits> scalar_prod_input,
     const at::PackedTensorAccessor32<T, 3, at::RestrictPtrTraits> v,
     const at::PackedTensorAccessor32<T, 2, at::RestrictPtrTraits> input, const T alpha) {
-    const int bs = blockIdx.y;
-    const int m = grad.size(1);
+    // Same grid layout as derivative_components_jvp_kernel above. The
+    // grad_alpha term used to be one atomicAdd into a single global scalar
+    // per thread across the ENTIRE grid (batch_size * m * n threads
+    // contending on one address) — reduce within the block first so each
+    // block contributes exactly one atomicAdd.
+    const int bs = blockIdx.z;
+    const int j = blockIdx.y;
     const int n = grad.size(2);
 
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (bs >= grad.size(0) || j >= grad.size(1)) return;
 
-    if (bs < grad.size(0) && index < n * m) {
-        int l = index % n;
-        int j = index / n;
+    T _sum = sum[bs][j];
+    _sum = (_sum != 0 ? _sum : 1); // Avoid division by zero
+    const T sp_over_sum = scalar_prod[bs][j] / _sum;
+    const T spi_over_sum = scalar_prod_input[bs][j] / _sum;
 
-        T _sum = sum[bs][j];
-        _sum = (_sum != 0 ? _sum : 1); // Avoid division by zero
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        grad_w[bs][j] = sp_over_sum;
+    }
 
-        T value = input[bs][l] - scalar_prod_input[bs][j] / _sum;
-        value = (grad[bs][j][l] * value * v[bs][j][l]) / alpha;
-        atomicAdd(&grad_alpha[0], value);
+    const int l = blockIdx.x * blockDim.x + threadIdx.x;
+    T thread_alpha = 0;
 
-        value = scalar_prod[bs][j] / _sum;
-        grad_w[bs][j] = value;
+    if (l < n) {
+        T value = input[bs][l] - spi_over_sum;
+        T g = grad[bs][j][l];
+        thread_alpha = (g * value * v[bs][j][l]) / alpha;
+        grad[bs][j][l] = g * (sp_over_sum - v[bs][j][l]);
+    }
 
-        value -= v[bs][j][l];
-        grad[bs][j][l] *= value;
+    T block_alpha = blockReduceSum(thread_alpha);
+    if (threadIdx.x == 0) {
+        atomicAdd(&grad_alpha[0], block_alpha);
     }
 }
 
@@ -518,10 +545,12 @@ std::vector<at::Tensor> jvp_cuda(at::Tensor input, at::Tensor output, at::Tensor
     auto grad_w = at::empty_like(output);
     auto grad_alpha = at::zeros({1}, input.options());
 
-    const dim3 num_blocks((n * m + threads - 1) / threads, batch_size);
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int blocks_per_n = (n + threads - 1) / threads;
+    const dim3 num_blocks(blocks_per_n, m, batch_size);
 
     AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "components_cuda", ([&] {
-        derivative_components_jvp_kernel<scalar_t><<<num_blocks, threads>>>(
+        derivative_components_jvp_kernel<scalar_t><<<num_blocks, threads, 0, stream>>>(
             input.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
             output.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 3, at::RestrictPtrTraits>(),
@@ -533,7 +562,7 @@ std::vector<at::Tensor> jvp_cuda(at::Tensor input, at::Tensor output, at::Tensor
     }));
 
     AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "grad_cuda", ([&] {
-        derivative_jvp_kernel<scalar_t><<<num_blocks, threads>>>(
+        derivative_jvp_kernel<scalar_t><<<num_blocks, threads, 0, stream>>>(
             grad.packed_accessor32<scalar_t, 3, at::RestrictPtrTraits>(),
             grad_w.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
             grad_alpha.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
